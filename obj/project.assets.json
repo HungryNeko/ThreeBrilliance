@@ -13,11 +13,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "E:\\Github\\ThreeBrilliance\\ThreeBrilliance\\ThreeBrilliance.csproj",
+      "projectUniqueName": "E:\\Github\\ThreeBrilliance\\ThreeBrilliance.csproj",
       "projectName": "ThreeBrilliance",
-      "projectPath": "E:\\Github\\ThreeBrilliance\\ThreeBrilliance\\ThreeBrilliance.csproj",
+      "projectPath": "E:\\Github\\ThreeBrilliance\\ThreeBrilliance.csproj",
       "packagesPath": "C:\\Users\\76379\\.nuget\\packages\\",
-      "outputPath": "E:\\Github\\ThreeBrilliance\\ThreeBrilliance\\obj\\",
+      "outputPath": "E:\\Github\\ThreeBrilliance\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\76379\\AppData\\Roaming\\NuGet\\NuGet.Config",
