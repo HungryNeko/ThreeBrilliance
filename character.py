@@ -12,12 +12,12 @@ class player(objects.character):
         self.show = True
 
     def shoot(self,i):
-        self.bullets.append(shoot.bullets(self.position_x,self.position_y,30,5,False,self.range,10,"up",0,0,5,i))
-        self.bullets.append(shoot.bullets(self.position_x,self.position_y,20,5,False,self.range,500,"up_sin",0,0,5,i))
+        self.bullets.append(shoot.bullets(self.position_x,self.position_y,30,5,False,self.range,10,"up",0,0,5,i,color=(255, 195,205)))
+        self.bullets.append(shoot.bullets(self.position_x,self.position_y,20,5,False,self.range,500,"up_sin",0,0,5,i,color=(100, 255, 100)))
         self.bullets.append(
-            shoot.bullets(self.position_x, self.position_y, 20, 5, False, self.range, 500, "angle_degree", 1, -1, 5, i))
+            shoot.bullets(self.position_x, self.position_y, 20, 5, False, self.range, 500, "angle_degree", 1, -1, 5, i,color=(255, 195,205)))
         self.bullets.append(
-            shoot.bullets(self.position_x, self.position_y, 20, 5, False, self.range, 500, "angle_degree", -1, -1, 5, i))
+            shoot.bullets(self.position_x, self.position_y, 20, 5, False, self.range, 500, "angle_degree", -1, -1, 5, i,color=(255, 195,205)))
 
 
 class enemy0(objects.character):
@@ -26,9 +26,10 @@ class enemy0(objects.character):
         self.show=True
         self.count=0
         self.fire_rate=fire_rate
+        self.boss=False
     def shoot(self,x,y):
         if self.show==True:
-            self.bullets.append(shoot.bullets(self.position_x, self.position_y, 10, 5, False, self.range, 10,"angle_en",x,y,5))
+            self.bullets.append(shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10,"angle_en",x,y,5))
         else:
             return False
     def move(self):
@@ -88,6 +89,7 @@ class boss0(enemy0):
         self.boss_card_sound = pygame.mixer.Sound("src/东方原作音效/弹幕展开tan.wav")
         self.boss_card_sound.set_volume(0.1)
         self.channel_card=pygame.mixer.Channel(4)
+        self.boss=True
 
     def shoot(self,x,y):
         if self.show==True:
@@ -104,13 +106,18 @@ class boss0(enemy0):
                         shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10, "angle_en",
                                       self.position_x + math.sin(i * 7.2 + self.count / self.fire_rate / 5),
                                       self.position_y + math.cos(i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,255,0)))
-            if self.count%8==0:
+            if self.count%8==0:#反向旋转
                 for i in range(-2, 1):
                     # self.bullets.append(shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10,"angle_en",x+i*100,y,5))
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 10, "angle_en",
                                       self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300),
                                       self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300), 5,color=(255,255,0)))
+                    self.bullets.append(
+                        shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 10, "angle_en",
+                                      self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300+30),
+                                      self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300+30), 5,
+                                      color=(255, 255, 0)))
         else:
             return False
     def move(self):

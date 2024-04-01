@@ -34,12 +34,12 @@ def new_enemy(list,c,i=0):
         if c%120==0:
             list.append(character.enemy0(random.uniform(0,WINDOW_WIDTH),0,1.5,
                                          10,True,
-                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],200,(255,0,0)))
+                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],200,(255,0,0),10))
     if i==1:
         if c%300==0:
             list.append(character.enemy1(random.uniform(0,WINDOW_WIDTH),0,0.5,
                                          30,True,
-                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],1000,(255,0,0)))
+                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],1000,(255,0,0),10))
     if i==3:
         if list==[]:
             list.append(character.boss0(WINDOW_WIDTH//2,0,0.5,
@@ -103,41 +103,7 @@ def rungame():
 
         # 清除屏幕
         window.fill((0, 0, 0))
-
-        #弹幕
-        player1.update_bullets()
-        #玩家子弹
-        for i1,i in enumerate(player1.bullets):
-
-            if count%2==0:
-                x,y=i.before(0,0.2)
-                pygame.draw.circle(window, (150, 90, 100), (x,
-                                                           y), i.size)
-            if count%3==0:
-                x, y = i.before(0,0.5)
-                pygame.draw.circle(window, (50, 40, 50), (x,
-                                                          y), i.size)
-        for i1, i in enumerate(player1.bullets):
-            pygame.draw.circle(window, (255, 192, 203), (i.position_x,
-                                                       i.position_y), i.size)
-
-            for e in enemy_list:
-                if math.sqrt((i.position_x-e.position_x)**2+(e.position_y-i.position_y)**2)<e.size+i.size and e.show:#命中
-                    e.change_health(-i.power)
-                    i.show=False
-                if not channel_hit.get_busy():
-                    channel_hit.play(hit_sound)
-                    #print(channel_hit.get_busy())
-        # 绘制角色
-        pl = count // 10
-        if direction == 0:
-            window.blit(spritesheet[pl % 3], (player1.position_x - 25, player1.position_y - 25))
-        elif direction == 2:
-            window.blit(spritesheet[pl % 3 + 3], (player1.position_x - 25, player1.position_y - 25))
-        else:
-            window.blit(spritesheet[pl % 3 + 6], (player1.position_x - 25, player1.position_y - 25))
-
-        #敌人生产
+        #新敌人，绘制敌人
         new_enemy(enemy_list,count,enemy_type)
         if len(enemy_list)>0:
             remove_en=[]
@@ -148,12 +114,53 @@ def rungame():
                     #boss 血条
                     if enemy_type==3:
                         show_heath(e, good=False)
-                        draw_image('src/img.png',e.position_x,e.position_y,e.size+100)
-                        if e.health<=0:
-                            #print(10)
-                            channel_crash.play(crash_sound)
+                        draw_image('src/img.png',e.position_x,e.position_y-25,e.size+100)
+                        #print(e.health)
+
                     else:
                         pygame.draw.circle(window, e.color, (e.position_x, e.position_y), e.size)
+        #弹幕
+        player1.update_bullets()
+        #玩家子弹
+        for i1,i in enumerate(player1.bullets):
+
+            if count%2==0:
+                x,y=i.before(0,0.2)
+                color_1= tuple(max(0, value - 50) for value in i.color)
+                pygame.draw.circle(window, color_1, (x,
+                                                           y), i.size)
+            if count%3==0:
+                x, y = i.before(0,0.5)
+                color_2 = tuple(max(0, value - 50) for value in i.color)
+                pygame.draw.circle(window, color_2, (x,
+                                                          y), i.size)
+        for i1, i in enumerate(player1.bullets):
+            pygame.draw.circle(window, i.color, (i.position_x,
+                                                       i.position_y), i.size)
+            #攻击敌人
+            for e in enemy_list:
+                if math.sqrt((i.position_x-e.position_x)**2+(e.position_y-i.position_y)**2)<e.size+i.size and e.show:#命中
+                    e.change_health(-i.power)
+                    i.show=False
+                    if e.health <= 0 and e.boss:
+                        # print(10)
+                        channel_crash.play(crash_sound)
+                        # print("1")
+                if not channel_hit.get_busy():
+                    channel_hit.play(hit_sound)
+                    #print(channel_hit.get_busy())
+        # 绘制角色
+        pl = count // 10
+        if direction == 0:
+            window.blit(spritesheet[pl % 3], (player1.position_x - 25-1, player1.position_y - 25))
+        elif direction == 2:
+            window.blit(spritesheet[pl % 3 + 3], (player1.position_x - 25-1, player1.position_y - 25))
+        else:
+            window.blit(spritesheet[pl % 3 + 6], (player1.position_x - 25-1, player1.position_y - 25))
+
+        #敌人生产
+        if len(enemy_list)>0:
+            for i,e in enumerate(enemy_list):
                 e.update_bullets()
                 #敌人弹幕
                 for b in e.bullets:
