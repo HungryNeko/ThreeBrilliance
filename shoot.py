@@ -16,6 +16,8 @@ class bullets(objects.objects):
         self.next_position=[]
         self.last_x = self.record[0]
         self.last_y = self.record[1]
+        self.position_x=0
+        self.position_y=0
 
 
     def move(self,target=None):

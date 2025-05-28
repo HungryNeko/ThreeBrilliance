@@ -85,24 +85,38 @@ class Train:
     def action1(self):
         self.learncount+=1
         self.learncount%= 10000
-        if self.learncount==1:
-            #self.learntimes+=1
-            agent.save(f'current_best.pth')  # 保存模型状态
-        # 1. 如果存在上一次的状态和动作，先进行学习
-        if self._last_processed_state and self._last_action:
-            # 计算奖励
-            reward = 0
-            if self.last_time_hit > 0:
-                reward += self.last_time_hit * 1.0  # 命中奖励
-            if self.last_time_hurt > 0:
-                reward -= self.last_time_hurt * 100.0  # 受伤惩罚
-            # if self.player1.health <= 0:
-            #     reward -= 100  # 死亡惩罚
-            if len(self.enemy_list) == 0:
-                reward += 100  # 消灭所有敌人奖励
+        if self.learntimes%3==0:
+            if self.learncount==1:
+                #self.learntimes+=1
+                agent.save(f'current_best.pth')  # 保存模型状态
+            # 1. 如果存在上一次的状态和动作，先进行学习
+            if self._last_processed_state and self._last_action:
+                # 计算奖励
+                reward = 0
+                if self.last_time_hit > 0:
+                    reward += self.last_time_hit * 1.0  # 命中奖励
+                if self.last_time_hurt > 0:
+                    reward -= self.last_time_hurt * 100.0  # 受伤惩罚
+                # if self.player1.health <= 0:
+                #     reward -= 100  # 死亡惩罚
+                if len(self.enemy_list) == 0:
+                    reward += 100  # 消灭所有敌人奖励
 
-            # 获取当前状态
-            current_state, _ = agent._process_game_state(
+                # 获取当前状态
+                current_state, _ = agent._process_game_state(
+                    self.enemy_list,
+                    [self.player1.position_x, self.player1.position_y],
+                    self.last_time_hit,
+                    self.last_time_hurt,
+                    self.WINDOW_WIDTH,
+                    self.WINDOW_HEIGHT
+                )
+
+                # 进行Q-learning更新
+                agent.learn(reward, current_state, self.player1.health <= 0)
+
+            # 2. 处理当前状态并获取新动作
+            processed_state, current_reward = agent._process_game_state(
                 self.enemy_list,
                 [self.player1.position_x, self.player1.position_y],
                 self.last_time_hit,
@@ -111,30 +125,18 @@ class Train:
                 self.WINDOW_HEIGHT
             )
 
-            # 进行Q-learning更新
-            agent.learn(reward, current_state, self.player1.health <= 0)
+            # 3. 获取动作
+            action = agent.get_action(processed_state)
 
-        # 2. 处理当前状态并获取新动作
-        processed_state, current_reward = agent._process_game_state(
-            self.enemy_list,
-            [self.player1.position_x, self.player1.position_y],
-            self.last_time_hit,
-            self.last_time_hurt,
-            self.WINDOW_WIDTH,
-            self.WINDOW_HEIGHT
-        )
+            # 4. 存储当前状态和动作
+            self._last_processed_state = processed_state
+            self._last_action = action
+            self.action = action
 
-        # 3. 获取动作
-        action = agent.get_action(processed_state)
+            # 5. 重置命中/受伤计数器
+            self.last_time_hit = 0
+            self.last_time_hurt = 0
 
-        # 4. 存储当前状态和动作
-        self._last_processed_state = processed_state
-        self._last_action = action
-        self.action = action
-
-        # 5. 重置命中/受伤计数器
-        self.last_time_hit = 0
-        self.last_time_hurt = 0
     def run(self):
         if self.visual:
             self.channel_sound.play(self.sound)
@@ -250,6 +252,7 @@ class Train:
             self.show_heath(self.player1, True)
             #self.clock.tick(1000)
             self.countfps+=1
+            #print(agent.bullet_count)
             if self.countfps % 100 == 0:
                 print(f'FPS: {self.countfps / (time.time() - self.curtime):.2f}, Bulltets_count: {agent.bullet_count}')
                 self.countfps = 0

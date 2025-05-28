@@ -18,6 +18,8 @@ class STGAgent:
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
         self.bullet_count=[]
+        self.care_range=2
+        self.direction_range = 2  # 方向范围
 
         # Q表 (使用字典存储)
         self.q_table = defaultdict(lambda: np.zeros(self.action_size))
@@ -105,7 +107,7 @@ class STGAgent:
         返回: (各方向子弹数[9], 敌人在左/右), reward
         """
         x, y = player_pos
-        d = 10  # 区域半径
+        d = self.direction_range  # 区域半径
 
         # 定义9个方向区域中心点
         directions = [
@@ -116,16 +118,50 @@ class STGAgent:
 
         # 计算每个方向的子弹数量
         bullet_counts = [0] * 9
+        zone_radius = self.care_range  # 区域判定半径
+
         for enemy in enemy_list:
             for bullet in enemy.bullets:
                 if bullet.show:
-                    b_x, b_y = bullet.record[0], bullet.record[1]
-                    b_speed= bullet.record[2]
-                    for i, (dir_x, dir_y) in enumerate(directions):
-                        distance_to_direction = math.sqrt((b_x - dir_x) ** 2 + (b_y - dir_y) ** 2)
-                        time_to_hit= distance_to_direction / b_speed
-                        bullet_counts[i] += 1/(time_to_hit+0.1)
-        self.bullet_count=bullet_counts
+                    current_x, current_y = bullet.position_x, bullet.position_y
+                    last_x, last_y = bullet.last_x, bullet.last_y
+                    b_speed = bullet.record[2]
+
+                    # 计算子弹运动向量
+                    move_x = current_x - last_x
+                    move_y = current_y - last_y
+
+                    # 跳过静止子弹
+                    if move_x == 0 and move_y == 0:
+                        continue
+
+                    # 计算运动方向单位向量
+                    move_mag = math.sqrt(move_x ** 2 + move_y ** 2)
+                    dir_x = move_x / move_mag
+                    dir_y = move_y / move_mag
+
+                    for i, (zone_x, zone_y) in enumerate(directions):
+                        # 计算区域到子弹的向量
+                        to_zone_x = zone_x - current_x
+                        to_zone_y = zone_y - current_y
+
+                        # 计算点到直线距离（子弹运动轨迹）
+                        # 直线方程：(current_x,current_y) 沿 (dir_x,dir_y) 方向
+                        A = -dir_y
+                        B = dir_x
+                        C = dir_y * current_x - dir_x * current_y
+                        distance = abs(A * zone_x + B * zone_y + C) / math.sqrt(A ** 2 + B ** 2)
+
+                        # 判断是否在威胁范围内
+                        if distance <= zone_radius:
+                            # 计算投影点是否在子弹前方
+                            proj = dir_x * to_zone_x + dir_y * to_zone_y
+                            if proj > 0:  # 区域在子弹运动前方
+                                # 简单时间估算
+                                dist = math.sqrt(to_zone_x ** 2 + to_zone_y ** 2)
+                                bullet_counts[i] += 1 / (dist / (b_speed + 0.1) + 0.1)
+
+        self.bullet_count = bullet_counts
 
 
         # 确定敌人在左还是右
