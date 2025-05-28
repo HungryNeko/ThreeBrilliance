@@ -50,7 +50,7 @@ class Train:
         self.close_sound.set_volume(self.volume)
         self.crash_sound.set_volume(self.volume)
         #if visual
-        self.visual = True
+        self.visual = False
     def new_enemy(self, i=0):
         if i == 0:
             if self.count % 120 == 0:

@@ -18,6 +18,7 @@ class STGAgent:
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
         self.bullet_count=[]
+        self.care_size=7
 
         # Q表 (使用字典存储)
         self.q_table = defaultdict(lambda: np.zeros(self.action_size))
@@ -105,7 +106,7 @@ class STGAgent:
         返回: (各方向子弹数[9], 敌人在左/右), reward
         """
         x, y = player_pos
-        d = 10  # 区域半径
+        d = self.care_size # 区域半径
 
         # 定义9个方向区域中心点
         directions = [
