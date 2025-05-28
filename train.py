@@ -1,17 +1,18 @@
 import math
 import random
 import sys
-
+import time
 import pygame
 
 import character
 import img
-from DuelingDQN import STGAgent
+from RLmodel import STGAgent
 
 
 class Train:
     def __init__(self):
         self.last_time_hit=0
+        self.countfps=0
         self.last_time_hurt = 0
         self._last_processed_state= None
         self._last_action = None
@@ -27,9 +28,11 @@ class Train:
                                         [0, 0, self.WINDOW_WIDTH, self.WINDOW_HEIGHT - 5], 100, (20, 255, 255))
         self.clock = pygame.time.Clock()
         self.enemy_list = []
+        self.curtime= time.time()
         self.count = 0
         self.enemy_type = 3
         self.learncount=0
+        self.learntimes=0
 
         # 资源加载
         self.spritesheet = img.load_character_spritesheet("src/img_1.png", 4, 3, 50, 50)
@@ -46,7 +49,8 @@ class Train:
         self.hit_sound.set_volume(self.volume)
         self.close_sound.set_volume(self.volume)
         self.crash_sound.set_volume(self.volume)
-
+        #if visual
+        self.visual = True
     def new_enemy(self, i=0):
         if i == 0:
             if self.count % 120 == 0:
@@ -79,9 +83,38 @@ class Train:
         self.window.blit(image, image_rect)
 
     def action1(self):
+        self.learncount+=1
+        self.learncount%= 10000
+        if self.learncount==1:
+            #self.learntimes+=1
+            agent.save(f'current_best.pth')  # 保存模型状态
+        # 1. 如果存在上一次的状态和动作，先进行学习
+        if self._last_processed_state and self._last_action:
+            # 计算奖励
+            reward = 0
+            if self.last_time_hit > 0:
+                reward += self.last_time_hit * 1.0  # 命中奖励
+            if self.last_time_hurt > 0:
+                reward -= self.last_time_hurt * 100.0  # 受伤惩罚
+            # if self.player1.health <= 0:
+            #     reward -= 100  # 死亡惩罚
+            if len(self.enemy_list) == 0:
+                reward += 100  # 消灭所有敌人奖励
 
+            # 获取当前状态
+            current_state, _ = agent._process_game_state(
+                self.enemy_list,
+                [self.player1.position_x, self.player1.position_y],
+                self.last_time_hit,
+                self.last_time_hurt,
+                self.WINDOW_WIDTH,
+                self.WINDOW_HEIGHT
+            )
 
-        # 2. 处理状态并获取动作
+            # 进行Q-learning更新
+            agent.learn(reward, current_state, self.player1.health <= 0)
+
+        # 2. 处理当前状态并获取新动作
         processed_state, current_reward = agent._process_game_state(
             self.enemy_list,
             [self.player1.position_x, self.player1.position_y],
@@ -90,48 +123,21 @@ class Train:
             self.WINDOW_WIDTH,
             self.WINDOW_HEIGHT
         )
+
+        # 3. 获取动作
         action = agent.get_action(processed_state)
 
-        # 3. 如果是第一次调用，只存储不学习
-        if not self._last_processed_state:
-            self._last_processed_state = processed_state
-            self._last_action = self.action
-            self._last_reward = 0
-            return action
+        # 4. 存储当前状态和动作
+        self._last_processed_state = processed_state
+        self._last_action = action
+        self.action = action
 
-        # 4. 学习阶段（使用上一帧的状态和当前帧的奖励）
-        done = False # 检查游戏是否结束
-
-        try:
-            print(self.action)
-            agent.learn(
-                self._last_processed_state,
-                self._last_action,
-                current_reward,  # 注意：这里使用当前帧的奖励作为上一动作的奖励
-                processed_state,
-                done
-            )
-            self._last_processed_state = processed_state
-            self._last_action = action
-
-            # 5. 更新存储的状态
-            self._last_processed_state = processed_state
-            self._last_action = action
-            self._last_reward = current_reward
-
-            # 6. 重置命中/受伤计数器
-            self.last_time_hit = 0
-            self.last_time_hurt = 0
-
-            self.action=action
-            print(action)
-        except Exception as e:
-            pass
-
-
+        # 5. 重置命中/受伤计数器
+        self.last_time_hit = 0
+        self.last_time_hurt = 0
     def run(self):
-
-        self.channel_sound.play(self.sound)
+        if self.visual:
+            self.channel_sound.play(self.sound)
         while True:
             self.action1()
             direction = 0
@@ -145,27 +151,27 @@ class Train:
             shift = 1
 
             self.player1.shoot(shift)
-            if self.action==0:
+            if self.action == 0:  # 左上
                 self.player1.move_x(-shift)
                 self.player1.move_y(-shift)
-            elif self.action==1:
-                self.player1.move_x(shift)
-                self.player1.move_y(shift)
-            elif self.action==2:
-                self.player1.move_x(-shift)
-                self.player1.move_y(shift)
-            elif self.action==3:
+            elif self.action == 1:  # 上
+                self.player1.move_y(-shift)
+            elif self.action == 2:  # 右上
                 self.player1.move_x(shift)
                 self.player1.move_y(-shift)
-            elif self.action==4:
-                self.player1.move_x(-shift)
-            elif self.action==5:
+            elif self.action == 3:  # 右
                 self.player1.move_x(shift)
-            elif self.action==6:
-                self.player1.move_y(-shift)
-            elif self.action==7:
+            elif self.action == 4:  # 右下
+                self.player1.move_x(shift)
                 self.player1.move_y(shift)
-            elif self.action:
+            elif self.action == 5:  # 下
+                self.player1.move_y(shift)
+            elif self.action == 6:  # 左下
+                self.player1.move_x(-shift)
+                self.player1.move_y(shift)
+            elif self.action == 7:  # 左
+                self.player1.move_x(-shift)
+            elif self.action == 8:  # 不动
                 pass
 
 
@@ -207,9 +213,11 @@ class Train:
 
                         i.show = False
                         if e.health <= 0 and e.boss:
-                            self.channel_crash.play(self.crash_sound)
+                            if self.visual:
+                                self.channel_crash.play(self.crash_sound)
                     if not self.channel_hit.get_busy():
-                        self.channel_hit.play(self.hit_sound)
+                        if self.visual:
+                            self.channel_hit.play(self.hit_sound)
             pl = self.count // 10
             if direction == 0:
                 self.window.blit(self.spritesheet[pl % 3], (self.player1.position_x - 25 - 1, self.player1.position_y - 25))
@@ -229,7 +237,8 @@ class Train:
 
                             b.show = False
                         elif b.size + self.player1.size + 5 > math.sqrt((b.position_x - self.player1.position_x) ** 2 + (b.position_y - self.player1.position_y) ** 2) > b.size + self.player1.size and self.player1.show:
-                            self.channel_close.play(self.close_sound)
+                            if self.visual:
+                                self.channel_close.play(self.close_sound)
                         if b.show:
                             pygame.draw.circle(self.window, b.color, (b.position_x, b.position_y), b.size)
                     if e.update(self.player1.position_x, self.player1.position_y) == False:
@@ -239,14 +248,27 @@ class Train:
             if shift != 1:
                 pygame.draw.circle(self.window, self.player1.color, (self.player1.position_x, self.player1.position_y), self.player1.size)
             self.show_heath(self.player1, True)
-            self.clock.tick(60)
-            pygame.display.update()
+            #self.clock.tick(1000)
+            self.countfps+=1
+            if self.countfps % 100 == 0:
+                print(f'FPS: {self.countfps / (time.time() - self.curtime):.2f}, Bulltets_count: {agent.bullet_count}')
+                self.countfps = 0
+                self.curtime= time.time()
+            if self.visual==False:
+                if self.learncount==100:
+                    pygame.display.update()
+            else:
+                pygame.display.update()
 
 # 用于直接运行
 if __name__ == "__main__":
     state_space = (9, 20, 3)  # 9 zones, 20 bullets per zone, 3 features per bullet
-    action_size = 9  # 8 directions + stay
-    agent = STGAgent(action_size)
+
+    agent = STGAgent()
+    try:
+        agent.load('current_best.pth')  # 尝试加载之前保存的模型
+    except FileNotFoundError:
+        print("No saved model found, starting fresh.")
 
     game = Train()
     game.run()

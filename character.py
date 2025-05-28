@@ -86,6 +86,7 @@ class enemy1(enemy0):
 class boss0(enemy0):
     def __init__(self, position_x, position_y, speed, size, check_in, range, health,color,fire_rate):
         super().__init__(position_x, position_y, speed, size, check_in, range, health,color,fire_rate)
+
         self.boss_card_sound = pygame.mixer.Sound("src/东方原作音效/弹幕展开tan.wav")
         self.boss_card_sound.set_volume(0.1)
         self.channel_card=pygame.mixer.Channel(4)
