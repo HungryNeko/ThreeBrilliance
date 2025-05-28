@@ -13,9 +13,14 @@ class bullets(objects.objects):
         self.power=power
         self.show=True
         self.color=color
+        self.next_position=[]
+        self.last_x = self.record[0]
+        self.last_y = self.record[1]
 
 
     def move(self,target=None):
+        self.last_x=self.record[0]
+        self.last_y=self.record[1]
         #print(self.move_func)
         if self.move_func=="up":
             self.position_x,self.position_y=move_funcs.move_up(self.record)
