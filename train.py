@@ -85,7 +85,7 @@ class Train:
     def action1(self):
         self.learncount+=1
         self.learncount%= 10000
-        if self.learntimes%3==0:
+        if self.learntimes%2==0:
             if self.learncount==1:
                 #self.learntimes+=1
                 agent.save(f'current_best.pth')  # 保存模型状态

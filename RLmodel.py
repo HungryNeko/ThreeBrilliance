@@ -124,6 +124,8 @@ class STGAgent:
             for bullet in enemy.bullets:
                 if bullet.show:
                     current_x, current_y = bullet.position_x, bullet.position_y
+                    if current_x<x-100 or current_x>x+100 or current_y<y-100 or current_y>y+100:
+                        continue
                     last_x, last_y = bullet.last_x, bullet.last_y
                     b_speed = bullet.record[2]
 
