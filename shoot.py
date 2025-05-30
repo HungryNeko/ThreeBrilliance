@@ -18,11 +18,15 @@ class bullets(objects.objects):
         self.last_y = self.record[1]
         self.position_x=0
         self.position_y=0
+        self.count=0
 
 
     def move(self,target=None):
-        self.last_x=self.record[0]
-        self.last_y=self.record[1]
+        self.count+=1
+        if self.count==5:
+            self.last_x=self.record[0]
+            self.last_y=self.record[1]
+            self.count=0
         #print(self.move_func)
         if self.move_func=="up":
             self.position_x,self.position_y=move_funcs.move_up(self.record)
