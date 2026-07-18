@@ -51,7 +51,7 @@ class Train:
         self.channel_hit = pygame.mixer.Channel(1)
         self.channel_close = pygame.mixer.Channel(2)
         self.channel_crash = pygame.mixer.Channel(3)
-        self.volume = 0.5
+        self.volume = .5
         self.sound.set_volume(self.volume)
         self.hit_sound.set_volume(self.volume)
         self.close_sound.set_volume(self.volume)
