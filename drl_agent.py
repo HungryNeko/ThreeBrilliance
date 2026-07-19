@@ -19,6 +19,7 @@ ACTION_LABELS = (
 @dataclass
 class GridState:
     grid: np.ndarray
+    local_grid: np.ndarray
     vector: np.ndarray
     features: tuple
 
@@ -46,9 +47,16 @@ class ReplayBuffer:
 
 
 class ConvDQN(nn.Module):
-    def __init__(self, grid_channels, vector_size, action_size, grid_shape=(90, 60)):
+    def __init__(
+            self,
+            grid_channels,
+            local_grid_channels,
+            vector_size,
+            action_size,
+            grid_shape=(90, 60),
+            local_grid_shape=(64, 64)):
         super().__init__()
-        self.conv = nn.Sequential(
+        self.global_conv = nn.Sequential(
             nn.Conv2d(grid_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
@@ -58,9 +66,19 @@ class ConvDQN(nn.Module):
             nn.Conv2d(96, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
         )
+        self.local_conv = nn.Sequential(
+            nn.Conv2d(local_grid_channels, 32, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 96, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
         with torch.no_grad():
-            dummy = torch.zeros(1, grid_channels, grid_shape[0], grid_shape[1])
-            conv_size = int(np.prod(self.conv(dummy).shape[1:]))
+            global_dummy = torch.zeros(1, grid_channels, grid_shape[0], grid_shape[1])
+            local_dummy = torch.zeros(1, local_grid_channels, local_grid_shape[0], local_grid_shape[1])
+            global_conv_size = int(np.prod(self.global_conv(global_dummy).shape[1:]))
+            local_conv_size = int(np.prod(self.local_conv(local_dummy).shape[1:]))
         self.vector_net = nn.Sequential(
             nn.Linear(vector_size, 64),
             nn.ReLU(),
@@ -68,15 +86,16 @@ class ConvDQN(nn.Module):
             nn.ReLU(),
         )
         self.head = nn.Sequential(
-            nn.Linear(conv_size + 64, 256),
+            nn.Linear(global_conv_size + local_conv_size + 64, 256),
             nn.ReLU(),
             nn.Linear(256, action_size),
         )
 
-    def forward(self, grid, vector):
-        conv_out = self.conv(grid).flatten(1)
+    def forward(self, grid, local_grid, vector):
+        global_out = self.global_conv(grid).flatten(1)
+        local_out = self.local_conv(local_grid).flatten(1)
         vector_out = self.vector_net(vector)
-        return self.head(torch.cat([conv_out, vector_out], dim=1))
+        return self.head(torch.cat([global_out, local_out, vector_out], dim=1))
 
 
 class DRLAgent:
@@ -94,10 +113,25 @@ class DRLAgent:
         self.shot_cone_angle_degrees = 14
         self.shot_center_angle_degrees = 4
         self.use_hard_rules = False
+        self.use_safety_prior = True
+        self.player_radius = 5
+        self.action_step = 10
+        self.safety_margin = 22
+        self.safety_lookahead_frames = (1, 2, 4, 6, 8)
+        self.safety_penalty_scale = 6000.0
+        self.use_attack_prior = True
+        self.attack_prior_scale = 900.0
+        self.boss_attack_prior_scale = 1800.0
+        self.attack_vertical_min = 40.0
+        self.attack_under_distance = 260.0
+        self.attack_under_band = 180.0
 
         self.grid_width = 60
         self.grid_height = 90
         self.grid_channels = 8
+        self.local_grid_size = 64
+        self.local_grid_channels = 8
+        self.local_world_radius = 260
         self.vector_size = 14
         self._grid_cache = {}
         self.device = self._select_device(device)
@@ -118,15 +152,19 @@ class DRLAgent:
 
         self.policy_net = ConvDQN(
             self.grid_channels,
+            self.local_grid_channels,
             self.vector_size,
             self.action_size,
             grid_shape=(self.grid_height, self.grid_width),
+            local_grid_shape=(self.local_grid_size, self.local_grid_size),
         ).to(self.device)
         self.target_net = ConvDQN(
             self.grid_channels,
+            self.local_grid_channels,
             self.vector_size,
             self.action_size,
             grid_shape=(self.grid_height, self.grid_width),
+            local_grid_shape=(self.local_grid_size, self.local_grid_size),
         ).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
@@ -150,13 +188,18 @@ class DRLAgent:
     def get_action(self, full_state, enemy_list=None):
         self.steps += 1
         q_values = self._predict_q(full_state)
+        enemy_list = enemy_list or ()
+        safety_priors = self._action_safety_priors(full_state, enemy_list) if self.use_safety_prior else np.zeros(self.action_size, dtype=np.float32)
+        attack_priors = self._action_attack_priors(full_state, enemy_list) if self.use_attack_prior else np.zeros(self.action_size, dtype=np.float32)
+        action_priors = safety_priors + attack_priors
+        adjusted_values = q_values + action_priors
         explored = False
         if random.random() < self.epsilon:
             action = random.randrange(self.action_size)
             explored = True
         else:
-            best_value = float(np.max(q_values))
-            best_actions = [i for i, value in enumerate(q_values) if abs(float(value) - best_value) < 1e-7]
+            best_value = float(np.max(adjusted_values))
+            best_actions = [i for i, value in enumerate(adjusted_values) if abs(float(value) - best_value) < 1e-7]
             action = random.choice(best_actions)
 
         self.last_decision = {
@@ -168,8 +211,10 @@ class DRLAgent:
             "epsilon": self.epsilon,
             "explored": explored,
             "q_values": tuple(float(v) for v in q_values),
-            "action_priors": tuple(0.0 for _ in range(self.action_size)),
-            "adjusted_values": tuple(float(v) for v in q_values),
+            "action_priors": tuple(float(v) for v in action_priors),
+            "safety_priors": tuple(float(v) for v in safety_priors),
+            "attack_priors": tuple(float(v) for v in attack_priors),
+            "adjusted_values": tuple(float(v) for v in adjusted_values),
             "device": str(self.device),
             "replay_size": len(self.replay),
             "updates": self.updates,
@@ -181,6 +226,123 @@ class DRLAgent:
         self.last_state = full_state
         self.last_action = action
         return action
+
+    def _action_attack_priors(self, state, enemy_list):
+        if state is None or len(state) < 20:
+            return np.zeros(self.action_size, dtype=np.float32)
+
+        targets = [enemy for enemy in enemy_list if getattr(enemy, "show", True)]
+        if not targets:
+            return np.zeros(self.action_size, dtype=np.float32)
+
+        bosses = [enemy for enemy in targets if getattr(enemy, "boss", False)]
+        x = float(state[18])
+        y = float(state[19])
+        target = min(bosses or targets, key=lambda enemy: abs(enemy.position_x - x) + abs(enemy.position_y - y))
+        dy_up = y - float(target.position_y)
+        if dy_up > self.shot_range:
+            return np.zeros(self.action_size, dtype=np.float32)
+
+        scale = self.boss_attack_prior_scale if getattr(target, "boss", False) else self.attack_prior_scale
+        cone_width = max(12.0, max(self.attack_vertical_min, dy_up) * math.tan(math.radians(self.shot_cone_angle_degrees)))
+        current_error = abs(float(target.position_x) - x)
+        current_under_error = abs(dy_up - self.attack_under_distance)
+        action_delta = (
+            (-1, -1), (0, -1), (1, -1),
+            (1, 0), (1, 1), (0, 1),
+            (-1, 1), (-1, 0), (0, 0),
+        )
+        priors = np.zeros(self.action_size, dtype=np.float32)
+        for action, (adx, ady) in enumerate(action_delta):
+            next_x = min(self.wall_x, max(0.0, x + adx * self.action_step))
+            next_y = min(self.wall_y, max(0.0, y + ady * self.action_step))
+            next_dy_up = next_y - float(target.position_y)
+            if next_dy_up < self.attack_vertical_min:
+                priors[action] -= scale * 0.5
+
+            next_error = abs(float(target.position_x) - next_x)
+            next_cone_width = max(12.0, max(self.attack_vertical_min, next_dy_up) * math.tan(math.radians(self.shot_cone_angle_degrees)))
+            alignment = max(0.0, 1.0 - next_error / next_cone_width)
+            improvement = max(-1.0, min(1.0, (current_error - next_error) / max(1.0, cone_width)))
+            next_under_error = abs(next_dy_up - self.attack_under_distance)
+            under_score = max(0.0, 1.0 - next_under_error / self.attack_under_band)
+            under_improvement = max(-1.0, min(1.0, (current_under_error - next_under_error) / self.attack_under_band))
+            priors[action] += scale * (
+                0.45 * alignment
+                + 0.20 * improvement
+                + 0.25 * under_score
+                + 0.10 * under_improvement
+            )
+            if next_error > current_error + 1e-6:
+                priors[action] -= scale * 0.2
+        return priors
+
+    def _action_safety_priors(self, state, enemy_list):
+        if state is None or len(state) < 20:
+            return np.zeros(self.action_size, dtype=np.float32)
+
+        x = float(state[18])
+        y = float(state[19])
+        action_delta = (
+            (-1, -1), (0, -1), (1, -1),
+            (1, 0), (1, 1), (0, 1),
+            (-1, 1), (-1, 0), (0, 0),
+        )
+        penalties = np.zeros(self.action_size, dtype=np.float32)
+        bullets = [
+            bullet
+            for enemy in enemy_list
+            for bullet in enemy.bullets
+            if getattr(bullet, "show", False)
+        ]
+        if not bullets:
+            return penalties
+
+        for action, (adx, ady) in enumerate(action_delta):
+            action_penalty = 0.0
+            for horizon in self.safety_lookahead_frames:
+                px = min(self.wall_x, max(0.0, x + adx * self.action_step * horizon))
+                py = min(self.wall_y, max(0.0, y + ady * self.action_step * horizon))
+                horizon_penalty = 0.0
+                for bullet in bullets:
+                    bx = float(bullet.position_x)
+                    by = float(bullet.position_y)
+                    if abs(bx - px) > 180 or abs(by - py) > 180:
+                        continue
+                    vx, vy = self._bullet_velocity(bullet)
+                    radius = float(getattr(bullet, "size", 0.0)) + self.player_radius
+                    rel_x = px - bx
+                    rel_y = py - by
+                    current_clearance = math.hypot(rel_x, rel_y) - radius
+                    speed = math.hypot(vx, vy)
+                    if speed < 1e-6:
+                        path_clearance = current_clearance
+                        closing = 0.0
+                    else:
+                        closing = (rel_x * vx + rel_y * vy) / speed
+                        path_clearance = abs(rel_x * vy - rel_y * vx) / speed - radius
+                    clearance = min(current_clearance, path_clearance if closing > -radius else current_clearance)
+                    if clearance < 0:
+                        horizon_penalty += self.safety_penalty_scale * 2.5 / math.sqrt(horizon)
+                    elif clearance < self.safety_margin:
+                        danger = (self.safety_margin - clearance) / self.safety_margin
+                        horizon_penalty += self.safety_penalty_scale * danger * danger / math.sqrt(horizon)
+                action_penalty += horizon_penalty
+            penalties[action] = -action_penalty
+        return penalties
+
+    @staticmethod
+    def _bullet_velocity(bullet):
+        count = getattr(bullet, "count", 0) or 5
+        vx = (float(bullet.position_x) - float(getattr(bullet, "last_x", bullet.position_x))) / max(1, count)
+        vy = (float(bullet.position_y) - float(getattr(bullet, "last_y", bullet.position_y))) / max(1, count)
+        speed = math.hypot(vx, vy)
+        max_speed = max(1.0, float(getattr(bullet, "speed", speed or 1.0)) * 2.0)
+        if speed > max_speed:
+            scale = max_speed / speed
+            vx *= scale
+            vy *= scale
+        return vx, vy
 
     def learn(self, reward, next_full_state, action, done=False):
         if self.last_state is not None and self.last_action is not None:
@@ -194,17 +356,19 @@ class DRLAgent:
         for _ in range(self.gradient_steps):
             states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
             grid = self._batch_grids(states)
+            local_grid = self._batch_local_grids(states)
             vector = self._batch_vectors(states)
             next_grid = self._batch_grids(next_states)
+            next_local_grid = self._batch_local_grids(next_states)
             next_vector = self._batch_vectors(next_states)
             action_tensor = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
             reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
             done_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
 
-            q = self.policy_net(grid, vector).gather(1, action_tensor)
+            q = self.policy_net(grid, local_grid, vector).gather(1, action_tensor)
             with torch.no_grad():
-                next_actions = self.policy_net(next_grid, next_vector).argmax(dim=1, keepdim=True)
-                next_q = self.target_net(next_grid, next_vector).gather(1, next_actions)
+                next_actions = self.policy_net(next_grid, next_local_grid, next_vector).argmax(dim=1, keepdim=True)
+                next_q = self.target_net(next_grid, next_local_grid, next_vector).gather(1, next_actions)
                 target = reward_tensor + (1.0 - done_tensor) * self.gamma * next_q
 
             loss = F.smooth_l1_loss(q, target)
@@ -224,11 +388,16 @@ class DRLAgent:
     def _predict_q(self, state):
         with torch.no_grad():
             grid = self._batch_grids([state])
+            local_grid = self._batch_local_grids([state])
             vector = self._batch_vectors([state])
-            return self.policy_net(grid, vector).squeeze(0).detach().cpu().numpy()
+            return self.policy_net(grid, local_grid, vector).squeeze(0).detach().cpu().numpy()
 
     def _batch_grids(self, states):
         arr = np.stack([s.grid for s in states]).astype(np.float32)
+        return torch.from_numpy(arr).to(self.device)
+
+    def _batch_local_grids(self, states):
+        arr = np.stack([s.local_grid for s in states]).astype(np.float32)
         return torch.from_numpy(arr).to(self.device)
 
     def _batch_vectors(self, states):
@@ -245,6 +414,7 @@ class DRLAgent:
         norm_ex, norm_ey, enemy_count = self._closest_enemy_features(enemy_list, x, y, wall_x, wall_y)
         aim_features = self._get_shot_cone_features(x, y, wall_x, wall_y, enemy_list)
         grid = self._encode_grid(enemy_list, x, y, wall_x, wall_y)
+        local_grid = self._encode_local_grid(enemy_list, x, y, wall_x, wall_y)
 
         enemies_alive = any(getattr(e, "show", True) for e in enemy_list)
         wall_penalty_dist = 100
@@ -265,13 +435,13 @@ class DRLAgent:
             wall_reward_coef = 0.2
 
         aim_left, aim_center, aim_right, aim_alignment, aim_dist = aim_features
-        base_reward = hit * 100.0 + hurt * -100.0
-        aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.6 + aim_alignment * 2.0) * 0.5
+        base_reward = hit * 100.0 + hurt * -150.0
+        aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.3 + aim_alignment * 1.0) * 0.4
         wall_reward = -wall_penalty * (1.0 if enemies_alive else 3.0)
         reward = (base_reward + aim_reward + wall_reward) * wall_reward_coef
         self.last_reward_components = {
             "hit": hit * 100.0,
-            "hurt": hurt * -100.0,
+            "hurt": hurt * -150.0,
             "aim": aim_reward,
             "wall": wall_reward,
             "wall_coef": wall_reward_coef,
@@ -311,7 +481,7 @@ class DRLAgent:
             wall_x, wall_y,      # 22-23
             *aim_features,       # 24-28
         )
-        return GridState(grid=grid, vector=vector, features=features), reward
+        return GridState(grid=grid, local_grid=local_grid, vector=vector, features=features), reward
 
     def _encode_grid(self, enemy_list, x, y, wall_x, wall_y):
         grid = np.zeros((self.grid_channels, self.grid_height, self.grid_width), dtype=np.float32)
@@ -349,6 +519,77 @@ class DRLAgent:
         self._encode_shot_cone_channel(grid[6], x, y, wall_x, wall_y)
         self._encode_wall_channel(grid[7])
         return grid
+
+    def _encode_local_grid(self, enemy_list, x, y, wall_x, wall_y):
+        grid = np.zeros(
+            (self.local_grid_channels, self.local_grid_size, self.local_grid_size),
+            dtype=np.float32,
+        )
+
+        for enemy in enemy_list:
+            for bullet in enemy.bullets:
+                if not getattr(bullet, "show", False):
+                    continue
+                bx, by = float(bullet.position_x), float(bullet.position_y)
+                mapped = self._foveated_local_point(bx - x, by - y)
+                if mapped is None:
+                    continue
+                gx, gy, radius = mapped
+                vx, vy = self._bullet_velocity(bullet)
+                speed = max(1e-6, math.hypot(vx, vy))
+                toward = max(0.0, -((bx - x) * vx + (by - y) * vy) / (max(1.0, math.hypot(bx - x, by - y)) * speed))
+                bullet_radius = max(1, radius + int(getattr(bullet, "size", 0) / 4))
+                self._stamp(grid[0], gx, gy, bullet_radius, 1.0)
+                self._stamp(grid[1], gx, gy, bullet_radius, max(-1.0, min(1.0, vx / 12.0)))
+                self._stamp(grid[2], gx, gy, bullet_radius, max(-1.0, min(1.0, vy / 12.0)))
+                self._stamp(grid[3], gx, gy, bullet_radius, toward)
+
+        for enemy in enemy_list:
+            if not getattr(enemy, "show", True):
+                continue
+            mapped = self._foveated_local_point(enemy.position_x - x, enemy.position_y - y)
+            if mapped is None:
+                continue
+            gx, gy, radius = mapped
+            hp_norm = min(1.0, max(0.05, getattr(enemy, "health", 1) / max(getattr(enemy, "full_health", 1), 1)))
+            enemy_radius = max(1, radius + int(getattr(enemy, "size", 0) / 8))
+            self._stamp(grid[4], gx, gy, enemy_radius, hp_norm)
+            if getattr(enemy, "boss", False):
+                self._stamp(grid[5], gx, gy, enemy_radius + 1, hp_norm)
+
+        center = self.local_grid_size // 2
+        self._stamp(grid[6], center, center, 1, 1.0)
+        self._encode_local_wall_channel(grid[7], x, y, wall_x, wall_y)
+        return grid
+
+    def _foveated_local_point(self, rel_x, rel_y):
+        radius = float(self.local_world_radius)
+        if abs(rel_x) > radius or abs(rel_y) > radius:
+            return None
+        center = (self.local_grid_size - 1) / 2.0
+        norm_x = abs(rel_x) / radius
+        norm_y = abs(rel_y) / radius
+        mapped_x = center + math.copysign(math.sqrt(norm_x) * center, rel_x) if rel_x else center
+        mapped_y = center + math.copysign(math.sqrt(norm_y) * center, rel_y) if rel_y else center
+        if not (0 <= mapped_x < self.local_grid_size and 0 <= mapped_y < self.local_grid_size):
+            return None
+        dist_norm = max(1e-3, math.hypot(rel_x, rel_y) / radius)
+        local_radius = max(1, min(8, int(1.0 / math.sqrt(dist_norm))))
+        return int(mapped_x), int(mapped_y), local_radius
+
+    def _encode_local_wall_channel(self, channel, x, y, wall_x, wall_y):
+        center = self.local_grid_size // 2
+        radius = float(self.local_world_radius)
+        for gy in range(self.local_grid_size):
+            for gx in range(self.local_grid_size):
+                nx = (gx - center) / max(1, center)
+                ny = (gy - center) / max(1, center)
+                rel_x = math.copysign(nx * nx * radius, nx)
+                rel_y = math.copysign(ny * ny * radius, ny)
+                wx = x + rel_x
+                wy = y + rel_y
+                dist = min(wx, wall_x - wx, wy, wall_y - wy)
+                channel[gy, gx] = 1.0 - min(1.0, max(0.0, dist) / 80.0)
 
     @staticmethod
     def _stamp(channel, gx, gy, radius, value):

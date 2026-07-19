@@ -521,7 +521,7 @@ class Train:
 
     def _handle_terminal_state(self, agent):
         if self.player1.health <= 0:
-            self._learn_terminal_transition(agent, "death", -5000.0)
+            self._learn_terminal_transition(agent, "death", -8000.0)
             self._reset_episode("death")
             return True
         if self._update_boss_stall_counter():
@@ -980,9 +980,11 @@ if __name__ == "__main__":
         gradient_steps=args.gradient_steps,
     )
 
+    model_loaded = False
     if not args.no_load:
         try:
             agent.load(args.checkpoint)
+            model_loaded = True
             print(f"Loaded {args.checkpoint} on {agent.device}.", flush=True)
         except FileNotFoundError:
             print(f"No saved model found at {args.checkpoint}, starting fresh on {agent.device}.", flush=True)
@@ -997,6 +999,6 @@ if __name__ == "__main__":
         log_every=args.log_every,
         checkpoint=args.checkpoint,
         log_file=args.log_file or None,
-        load_training_state=not args.no_load,
+        load_training_state=model_loaded,
     )
     game.run()
