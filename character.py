@@ -6,6 +6,34 @@ import pygame
 import objects
 import shoot
 import move_funcs
+
+
+class NullSound:
+    def set_volume(self, volume):
+        pass
+
+
+class NullChannel:
+    def play(self, sound):
+        pass
+
+
+def safe_sound(path, volume=0.0):
+    try:
+        sound = pygame.mixer.Sound(path)
+        sound.set_volume(volume)
+        return sound
+    except (FileNotFoundError, pygame.error):
+        return NullSound()
+
+
+def safe_channel(index):
+    try:
+        return pygame.mixer.Channel(index)
+    except pygame.error:
+        return NullChannel()
+
+
 class player(objects.character):
     def __init__(self, position_x, position_y, speed, size, check_in, range,health,color):
         super().__init__(position_x, position_y, speed, size, check_in, range,health,color,)
@@ -101,9 +129,8 @@ class boss1(enemy0):
     def __init__(self, position_x, position_y, speed, size, check_in, range, health,color,fire_rate,volume=0.5):
         super().__init__(position_x, position_y, speed, size, check_in, range, health,color,fire_rate)
 
-        self.boss_card_sound = pygame.mixer.Sound("src/东方原作音效/弹幕展开tan.wav")
-        self.boss_card_sound.set_volume(volume)
-        self.channel_card=pygame.mixer.Channel(4)
+        self.boss_card_sound = safe_sound("src/东方原作音效/弹幕展开tan.wav", volume)
+        self.channel_card=safe_channel(4)
         self.boss=True
 
     def shoot(self,x,y):
@@ -149,9 +176,8 @@ class boss0(enemy0):
     def __init__(self, position_x, position_y, speed, size, check_in, range, health,color,fire_rate,volume=0.5):
         super().__init__(position_x, position_y, speed, size, check_in, range, health,color,fire_rate)
 
-        self.boss_card_sound = pygame.mixer.Sound("src/东方原作音效/弹幕展开tan.wav")
-        self.boss_card_sound.set_volume(volume)
-        self.channel_card=pygame.mixer.Channel(4)
+        self.boss_card_sound = safe_sound("src/东方原作音效/弹幕展开tan.wav", volume)
+        self.channel_card=safe_channel(4)
         self.boss=True
 
     def shoot(self,x,y):

@@ -3,284 +3,120 @@ import numpy as np
 import random
 from collections import defaultdict
 
+from hard_rules import HardRulePolicy
+
+
+ACTION_LABELS = (
+    "left-up", "up", "right-up",
+    "right", "right-down", "down",
+    "left-down", "left", "stay",
+)
+
 class STGAgent:
-    def __init__(self):
+    def __init__(self, use_hard_rules=False):
         self.action_size = 9
         self.alpha = 0.05
         self.gamma = 0.98
         self.epsilon = 0.02
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
+        self.action_prior_weight = 2.0
         self.q_table = defaultdict(lambda: np.zeros(self.action_size))
         self.wall_x = 600
         self.wall_y = 900
         self.direction_range = 10
         self.warning_range = 30  # 新增：危险判定半径
+        self.threat_move_step = 25
+        self.max_lookahead = 500
+        self.wall_repulse_dist = 100
+        self.threat_angle_degrees = 10
+        self.shot_range = 900
+        self.shot_cone_angle_degrees = 14
+        self.shot_center_angle_degrees = 4
         self.last_state = None
         self.last_action = None
         self.last_position = [0, 0]
-        self.enemy_init_hp = dict()   # {enemy_id: init_hp}
-        self.enemy_lock_id = None     # 当前锁定的敌人id
+        self.use_hard_rules = use_hard_rules
+        self.hard_rules = HardRulePolicy(self.action_size, self.direction_range, self.warning_range)
+        self.last_decision = {}
 
     def get_action(self, full_state, enemy_list=None):
         """
-        1. 九宫格有弹幕时，强制避弹（无弹方向优先，否则弹幕最少的方向）。
-        2. 否则，主动全屏攻击（优先锁定血量最多的敌人，血量相同则中心距离最近，锁定后只追此敌）。
-        3. 如果靠墙/角且被弹幕压制（所有方向都有弹），则扫描全屏，往弹幕最少的边强制移动。
-        4. 优先向风险小的方向移动（warning_range风险评估）。
-        5. Q表微调。
+        Select the action from the actual RL policy.
+
+        With hard rules disabled, the model can choose from all 9 actions.
+        With hard rules enabled, hard_rules.py filters the candidate action set
+        before epsilon-greedy Q selection.
         """
-        bullet_counts = full_state[:9]
+        state_key = self._state_to_key(full_state)
+        q_values = self.q_table[state_key]
+        if self.use_hard_rules:
+            candidate_actions = self.hard_rules.filter_actions(full_state, enemy_list)
+            policy_mode = "hard-rule-filtered-q"
+        else:
+            candidate_actions = list(range(self.action_size))
+            policy_mode = "pure-q"
+
+        if not candidate_actions:
+            candidate_actions = list(range(self.action_size))
+
+        action_priors = self._get_action_priors(full_state, enemy_list)
+        adjusted_values = tuple(
+            float(q_values[i]) + self.action_prior_weight * action_priors[i]
+            for i in range(self.action_size)
+        )
+        explored = False
+        if len(candidate_actions) == 1:
+            action = candidate_actions[0]
+        elif random.random() < self.epsilon:
+            action = random.choice(candidate_actions)
+            explored = True
+        else:
+            best_value = max(adjusted_values[i] for i in candidate_actions)
+            best_actions = [
+                i for i in candidate_actions
+                if abs(adjusted_values[i] - best_value) < 1e-9
+            ]
+            action = random.choice(best_actions)
+
+        self.last_decision = {
+            "policy_mode": policy_mode,
+            "hard_rules_enabled": self.use_hard_rules,
+            "candidate_actions": tuple(candidate_actions),
+            "action": action,
+            "action_label": ACTION_LABELS[action],
+            "epsilon": self.epsilon,
+            "explored": explored,
+            "q_values": tuple(float(q_values[i]) for i in range(self.action_size)),
+            "action_priors": action_priors,
+            "adjusted_values": adjusted_values,
+            "state_key": state_key,
+        }
+        return action
+
+    def _get_action_priors(self, full_state, enemy_list=None):
+        if not enemy_list:
+            return tuple(0.0 for _ in range(self.action_size))
+
         x, y = full_state[18], full_state[19]
-        wall_x, wall_y = int(full_state[22]), int(full_state[23])
+        wall_x, wall_y = full_state[22], full_state[23]
         action_delta = [
             (-1, -1), (0, -1), (1, -1),
             (1, 0), (1, 1), (0, 1),
             (-1, 1), (-1, 0), (0, 0),
         ]
-
-        # === 记录所有当前敌人和初始血量 ===
-        self._update_enemy_hp(enemy_list)
-
-        # === 优先锁定血量最多的敌人（如有多名则中心近的） ===
-        locked_enemy = None
-        if enemy_list:
-            alive_enemies = [e for e in enemy_list if getattr(e, 'show', True)]
-            if alive_enemies:
-                enemy_id_list = [id(e) for e in alive_enemies]
-                filtered_hp = {eid: self.enemy_init_hp.get(eid, 0) for eid in enemy_id_list}
-                if filtered_hp:
-                    max_hp = max(filtered_hp.values())
-                    candidates = [e for e in alive_enemies if self.enemy_init_hp.get(id(e), 0) == max_hp]
-                    if len(candidates) == 1:
-                        locked_enemy = candidates[0]
-                    else:
-                        cx, cy = wall_x / 2, wall_y / 2
-                        locked_enemy = min(
-                            candidates,
-                            key=lambda e: (e.position_x - cx) ** 2 + (e.position_y - cy) ** 2
-                        )
-                    self.enemy_lock_id = id(locked_enemy)
-                else:
-                    self.enemy_lock_id = None
-            else:
-                self.enemy_lock_id = None
-        else:
-            self.enemy_lock_id = None
-
-        # ==== 新增：九宫格危险度分析 ====
-        warning_scores = self._calc_warning_scores(x, y, enemy_list)
-
-        # === 动作决策 ===
-        # 1. 判断是否需要强制避弹
-        if any(cnt > 0 for cnt in bullet_counts):
-            safe_dirs = [i for i, cnt in enumerate(bullet_counts) if cnt == 0]
-            if safe_dirs:
-                candidate_dirs = safe_dirs
-            else:
-                edge_dirs = self._find_edge_dirs_with_least_bullet(enemy_list, x, y, wall_x, wall_y)
-                if edge_dirs:
-                    candidate_dirs = edge_dirs
-                else:
-                    min_bullet = min(bullet_counts)
-                    candidate_dirs = [i for i, cnt in enumerate(bullet_counts) if cnt == min_bullet]
-        else:
-            candidate_dirs = list(range(self.action_size))
-            if enemy_list and self.enemy_lock_id is not None:
-                locked = None
-                for e in enemy_list:
-                    if id(e) == self.enemy_lock_id and getattr(e, 'show', True):
-                        locked = e
-                        break
-                if locked is not None:
-                    target_enemy = locked
-                    min_xdist = float('inf')
-                    best_x_dirs = []
-                    for i in candidate_dirs:
-                        dx, dy = action_delta[i]
-                        xx = x + dx * self.direction_range
-                        xdist = abs(xx - target_enemy.position_x)
-                        if xdist < min_xdist:
-                            min_xdist = xdist
-                            best_x_dirs = [i]
-                        elif xdist == min_xdist:
-                            best_x_dirs.append(i)
-                    best_y_dirs = []
-                    min_ydist = float('inf')
-                    for i in best_x_dirs:
-                        dx, dy = action_delta[i]
-                        xx = x + dx * self.direction_range
-                        yy = y + dy * self.direction_range
-                        if yy <= target_enemy.position_y + 1e-3:
-                            ydist = abs(yy - target_enemy.position_y)
-                            if ydist < min_ydist:
-                                min_ydist = ydist
-                                best_y_dirs = [i]
-                            elif ydist == min_ydist:
-                                best_y_dirs.append(i)
-                    if best_y_dirs:
-                        candidate_dirs = list(set(best_y_dirs))
-                    else:
-                        candidate_dirs = best_x_dirs
-            elif enemy_list:
-                enemies = [e for e in enemy_list if getattr(e, 'show', True)]
-                if enemies:
-                    min_xdist = float('inf')
-                    best_x_dirs = []
-                    for i in candidate_dirs:
-                        dx, dy = action_delta[i]
-                        xx = x + dx * self.direction_range
-                        xdist_to_enemies = [abs(xx - e.position_x) for e in enemies]
-                        xdist = min(xdist_to_enemies)
-                        if xdist < min_xdist:
-                            min_xdist = xdist
-                            best_x_dirs = [i]
-                        elif xdist == min_xdist:
-                            best_x_dirs.append(i)
-                    best_y_dirs = []
-                    min_ydist = float('inf')
-                    for i in best_x_dirs:
-                        dx, dy = action_delta[i]
-                        xx = x + dx * self.direction_range
-                        yy = y + dy * self.direction_range
-                        for e in enemies:
-                            if yy <= e.position_y + 1e-3:
-                                ydist = abs(yy - e.position_y)
-                                if ydist < min_ydist:
-                                    min_ydist = ydist
-                                    best_y_dirs = [i]
-                                elif ydist == min_ydist:
-                                    best_y_dirs.append(i)
-                    if best_y_dirs:
-                        candidate_dirs = list(set(best_y_dirs))
-                    else:
-                        candidate_dirs = best_x_dirs
-
-            # 3. 多个等价优先空旷（远离墙角/边缘）
-            if len(candidate_dirs) > 1:
-                def wall_score(i):
-                    dx, dy = action_delta[i]
-                    xx = x + dx * self.direction_range
-                    yy = y + dy * self.direction_range
-                    return min(xx, wall_x - xx, yy, wall_y - yy)
-                max_wall_score = max(wall_score(i) for i in candidate_dirs)
-                candidate_dirs = [i for i in candidate_dirs if abs(wall_score(i) - max_wall_score) < 1e-3]
-
-            # ==== 新增：多个等价优先向风险较小方向 ====
-            if len(candidate_dirs) > 1:
-                min_warning = min([warning_scores[i] for i in candidate_dirs])
-                warning_best = [i for i in candidate_dirs if abs(warning_scores[i] - min_warning) < 1e-6]
-                candidate_dirs = warning_best
-
-            # 4. 多个等价再回中下
-            if len(candidate_dirs) > 1:
-                target_x = wall_x / 2
-                target_y = wall_y * 0.8
-                def to_center_score(i):
-                    dx, dy = action_delta[i]
-                    xx = x + dx * self.direction_range
-                    yy = y + dy * self.direction_range
-                    return math.hypot(xx - target_x, yy - target_y)
-                min_center_score = min([to_center_score(i) for i in candidate_dirs])
-                candidate_dirs = [i for i in candidate_dirs if abs(to_center_score(i) - min_center_score) < 1e-3]
-
-        # 5. Q表微调
-        q_values = self.q_table[self._state_to_key(full_state)]
-        if len(candidate_dirs) == 1:
-            action = candidate_dirs[0]
-        else:
-            if random.random() < self.epsilon:
-                action = random.choice(candidate_dirs)
-            else:
-                action = max(candidate_dirs, key=lambda i: q_values[i])
-        return action
-
-    def _calc_warning_scores(self, x, y, enemy_list):
-        """
-        计算以当前(x, y)为中心，半径300，分为9宫格（中心点为direction_range的九宫格），
-        每个区域半径warning_range，落在该区域内的每颗子弹按 距离/速度 加权累加，作为风险值。
-        """
-        warning_radius = 300
-        d = self.direction_range
-        wr = self.warning_range
-        diag = d / math.sqrt(2)
-        danger_centers = [
-            (x - diag, y - diag), (x, y - d), (x + diag, y - diag),
-            (x + d, y), (x + diag, y + diag), (x, y + d),
-            (x - diag, y + diag), (x - d, y), (x, y)
-        ]
-        warning_scores = [0.0] * 9
-
-        if not enemy_list:
-            return warning_scores
-
-        for enemy in enemy_list:
-            for bullet in enemy.bullets:
-                if not getattr(bullet, 'show', False):
-                    continue
-                bx, by = bullet.position_x, bullet.position_y
-                bvx = getattr(bullet, 'vx', 0.0)
-                bvy = getattr(bullet, 'vy', 0.0)
-                bsize = getattr(bullet, 'size', 0)
-                speed = math.hypot(bvx, bvy)
-                if speed < 1e-6:
-                    speed = 1e-6
-                bullet_dist = math.hypot(bx - x, by - y)
-                if bullet_dist > warning_radius + bsize:
-                    continue
-                for i, (cx, cy) in enumerate(danger_centers):
-                    d2 = math.hypot(bx - cx, by - cy)
-                    if d2 <= wr + bsize:
-                        # 风险分数加权，距离越近、速度越快越危险
-                        # 距离权重越小风险越高，速度越小风险越高
-                        warning_scores[i] += (max(d2, 1.0) + bsize) / speed
-        return warning_scores
-
-    def _update_enemy_hp(self, enemy_list):
-        if enemy_list is None:
-            self.enemy_init_hp.clear()
-            self.enemy_lock_id = None
-            return
-        for e in enemy_list:
-            eid = id(e)
-            if eid not in self.enemy_init_hp:
-                self.enemy_init_hp[eid] = getattr(e, 'health', 0)
-        live_ids = set(id(e) for e in enemy_list)
-        to_del = [eid for eid in self.enemy_init_hp if eid not in live_ids]
-        for eid in to_del:
-            del self.enemy_init_hp[eid]
-        if self.enemy_lock_id is not None and self.enemy_lock_id not in live_ids:
-            self.enemy_lock_id = None
-
-    def _find_edge_dirs_with_least_bullet(self, enemy_list, x, y, wall_x, wall_y):
-        if enemy_list is None:
-            return []
-        edge_width = 60
-        edge_bullet_counts = [0, 0, 0, 0]
-        for enemy in enemy_list:
-            for bullet in enemy.bullets:
-                if not getattr(bullet, 'show', False): continue
-                bx, by = bullet.position_x, bullet.position_y
-                if by < edge_width:
-                    edge_bullet_counts[0] += 1  # 上
-                if by > wall_y - edge_width:
-                    edge_bullet_counts[1] += 1  # 下
-                if bx < edge_width:
-                    edge_bullet_counts[2] += 1  # 左
-                if bx > wall_x - edge_width:
-                    edge_bullet_counts[3] += 1  # 右
-        min_count = min(edge_bullet_counts)
-        preferred_edges = [i for i, c in enumerate(edge_bullet_counts) if c == min_count]
-        dir_map = {
-            0: [1],    # 上：正上
-            1: [5],    # 下：正下
-            2: [7],    # 左：正左
-            3: [3],    # 右：正右
-        }
-        result = []
-        for edge in preferred_edges:
-            result.extend(dir_map[edge])
-        return result
+        priors = []
+        for dx, dy in action_delta:
+            next_x = max(0, min(wall_x, x + dx * self.direction_range))
+            next_y = max(0, min(wall_y, y + dy * self.direction_range))
+            left, center, right, alignment, dist_norm = self._get_shot_cone_features(
+                next_x, next_y, wall_x, wall_y, enemy_list
+            )
+            aim_score = center * 2.0 + (left + right) * 0.6 + alignment * 2.0 - dist_norm
+            wall_dist = min(next_x, wall_x - next_x, next_y, wall_y - next_y)
+            wall_score = min(1.0, wall_dist / max(self.wall_repulse_dist, 1))
+            priors.append(aim_score + wall_score * 0.5)
+        return tuple(priors)
 
     def learn(self, reward, next_full_state, action):
         last_state_key = self._state_to_key(self.last_state) if self.last_state is not None else None
@@ -300,7 +136,7 @@ class STGAgent:
 
     def _state_to_key(self, state):
         if state is None:
-            return tuple([0]*16)
+            return tuple([0]*19)
         threat_scores = state[9:18]
         def quantize(val, bins=(0, 1, 5, 20, 100)):
             if val == 0: return 0.0
@@ -338,7 +174,34 @@ class STGAgent:
             wall_penalty = 0.33
         else:
             wall_penalty = 0.0
-        return threat_feat + (norm_x, norm_y, norm_ex, norm_ey, wall_penalty)
+        aim_left = self._quantize_count(state[24]) if len(state) > 24 else 0.0
+        aim_center = self._quantize_count(state[25]) if len(state) > 25 else 0.0
+        aim_right = self._quantize_count(state[26]) if len(state) > 26 else 0.0
+        aim_alignment = self._quantize_unit(state[27]) if len(state) > 27 else 0.0
+        aim_dist = self._quantize_unit(state[28]) if len(state) > 28 else 1.0
+        return threat_feat + (
+            norm_x, norm_y, norm_ex, norm_ey, wall_penalty,
+            aim_left, aim_center, aim_right, aim_alignment, aim_dist,
+        )
+
+    @staticmethod
+    def _quantize_count(count):
+        if count <= 0:
+            return 0.0
+        if count == 1:
+            return 0.33
+        if count == 2:
+            return 0.66
+        return 1.0
+
+    @staticmethod
+    def _quantize_unit(value):
+        value = max(0.0, min(1.0, float(value)))
+        if value < 0.125: return 0.0
+        elif value < 0.375: return 0.25
+        elif value < 0.625: return 0.5
+        elif value < 0.875: return 0.75
+        else: return 1.0
 
     def _process_game_state(self, enemy_list, player_pos, hit, hurt, wall_x, wall_y):
         self.wall_x = wall_x
@@ -418,22 +281,81 @@ class STGAgent:
             hit * 100.0 +
             hurt * -100.0
         )
-        reward = (base_reward - wall_penalty * (1. if enemies_alive else 3.0)) * wall_reward_coef
+        aim_features = self._get_shot_cone_features(x, y, wall_x, wall_y, enemy_list)
+        aim_left, aim_center, aim_right, aim_alignment, aim_dist = aim_features
+        aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.6 + aim_alignment * 2.0) * 0.5
+        wall_reward = -wall_penalty * (1. if enemies_alive else 3.0)
+        reward = (base_reward + aim_reward + wall_reward) * wall_reward_coef
+        self.last_reward_components = {
+            "hit": hit * 100.0,
+            "hurt": hurt * -100.0,
+            "aim": aim_reward,
+            "wall": wall_reward,
+            "wall_coef": wall_reward_coef,
+            "total": reward,
+        }
 
         full_state = (
             *bullet_inbox_counts,    # 0-8
             *threat_scores,          # 9-17
             x, y,                    # 18, 19
             norm_ex, norm_ey,        # 20, 21
-            wall_x, wall_y           # 22, 23
+            wall_x, wall_y,          # 22, 23
+            *aim_features            # 24-28
         )
         self.last_position = [x, y]
         return full_state, reward
 
+    def _get_shot_cone_features(self, x, y, wall_x, wall_y, enemy_list):
+        left_count = 0
+        center_count = 0
+        right_count = 0
+        best_alignment = 0.0
+        nearest_dist_norm = 1.0
+
+        cone_angle = math.radians(self.shot_cone_angle_degrees)
+        center_angle = math.radians(self.shot_center_angle_degrees)
+
+        for enemy in enemy_list:
+            if not getattr(enemy, "show", True):
+                continue
+            dx = enemy.position_x - x
+            dy_up = y - enemy.position_y
+            if dy_up <= 0:
+                continue
+            dist = math.hypot(dx, dy_up)
+            if dist > self.shot_range:
+                continue
+
+            angle = math.atan2(dx, dy_up)
+            enemy_radius_angle = math.atan2(getattr(enemy, "size", 0), max(dy_up, 1.0))
+            effective_abs_angle = max(0.0, abs(angle) - enemy_radius_angle)
+            if effective_abs_angle > cone_angle:
+                continue
+
+            if angle < -center_angle:
+                left_count += 1
+            elif angle > center_angle:
+                right_count += 1
+            else:
+                center_count += 1
+
+            alignment = 1.0 - min(1.0, effective_abs_angle / cone_angle)
+            best_alignment = max(best_alignment, alignment)
+            nearest_dist_norm = min(nearest_dist_norm, min(1.0, dist / self.shot_range))
+
+        return (
+            left_count,
+            center_count,
+            right_count,
+            best_alignment,
+            nearest_dist_norm,
+        )
+
     def _get_direction_threat(self, x, y, wall_x, wall_y, enemy_list):
-        move_step = 25
-        max_lookahead = 500
-        wall_repulse_dist = 100
+        move_step = self.threat_move_step
+        max_lookahead = self.max_lookahead
+        wall_repulse_dist = self.wall_repulse_dist
         wall_punish_base = 20.0
         k = 15.0
         action_delta = [
@@ -458,7 +380,7 @@ class STGAgent:
                     if speed < 1e-3: continue
                     bullet_angle = math.atan2(bvy, bvx)
                     angle_diff = abs(self._angle_diff(bullet_angle, dir_angle))
-                    if angle_diff > math.radians(10):
+                    if angle_diff > math.radians(self.threat_angle_degrees):
                         continue
                     dist = math.hypot(bx - x, by - y)
                     if dist > max_lookahead:

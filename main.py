@@ -11,11 +11,54 @@ import character
 
 # 初始化 Pygame
 pygame.init()
+AUDIO_ENABLED = False
+
+
+class NullSound:
+    def set_volume(self, volume):
+        pass
+
+
+class NullChannel:
+    def play(self, sound):
+        pass
+
+    def get_busy(self):
+        return False
+
+
+def safe_sound(path):
+    try:
+        return pygame.mixer.Sound(path)
+    except (FileNotFoundError, pygame.error):
+        return NullSound()
+
+
+def safe_channel(index):
+    try:
+        return pygame.mixer.Channel(index)
+    except pygame.error:
+        return NullChannel()
 
 # 设置游戏窗口大小
 WINDOW_WIDTH = 600
 WINDOW_HEIGHT = 900
-window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+
+def initial_ui_scale():
+    info = pygame.display.Info()
+    if info.current_w <= 0 or info.current_h <= 0:
+        return 0.8
+    width_fit = info.current_w * 0.9 / WINDOW_WIDTH
+    height_fit = info.current_h * 0.82 / WINDOW_HEIGHT
+    return max(0.35, min(1.0, width_fit, height_fit))
+
+def scaled_size(scale):
+    return (max(1, int(WINDOW_WIDTH * scale)), max(1, int(WINDOW_HEIGHT * scale)))
+
+ui_scale = initial_ui_scale()
+display_size = scaled_size(ui_scale)
+display = pygame.display.set_mode(display_size, pygame.RESIZABLE)
+window = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT)).convert()
 pygame.display.set_caption("ThreeBrilliance")
 
 # 设置角色的初始位置
@@ -29,6 +72,48 @@ clock = pygame.time.Clock()
 enemy_list=[]
 count=0
 enemy_type=3
+
+def set_display_size(size):
+    global display, display_size, ui_scale
+    width = max(240, int(size[0]))
+    height = max(360, int(size[1]))
+    display_size = (width, height)
+    ui_scale = min(width / WINDOW_WIDTH, height / WINDOW_HEIGHT)
+    display = pygame.display.set_mode(display_size, pygame.RESIZABLE)
+
+def change_ui_scale(delta):
+    global display, display_size, ui_scale
+    ui_scale = max(0.35, min(1.5, ui_scale + delta))
+    display_size = scaled_size(ui_scale)
+    display = pygame.display.set_mode(display_size, pygame.RESIZABLE)
+
+def present():
+    scaled_frame = pygame.transform.smoothscale(window, scaled_size(ui_scale))
+    display.fill((0, 0, 0))
+    offset_x = (display_size[0] - scaled_frame.get_width()) // 2
+    offset_y = (display_size[1] - scaled_frame.get_height()) // 2
+    display.blit(scaled_frame, (offset_x, offset_y))
+    pygame.display.update()
+
+def handle_event(event):
+    global ui_scale, display_size, display
+    if event.type == pygame.QUIT:
+        pygame.quit()
+        sys.exit()
+    if event.type == pygame.VIDEORESIZE:
+        set_display_size((event.w, event.h))
+        return
+    if event.type != pygame.KEYDOWN:
+        return
+    if event.key in (pygame.K_EQUALS, pygame.K_KP_PLUS):
+        change_ui_scale(0.1)
+    elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        change_ui_scale(-0.1)
+    elif event.key in (pygame.K_0, pygame.K_KP0):
+        ui_scale = initial_ui_scale()
+        display_size = scaled_size(ui_scale)
+        display = pygame.display.set_mode(display_size, pygame.RESIZABLE)
+
 def new_enemy(list,c,i=0):
     if i==0:
         if c%120==0:
@@ -44,7 +129,8 @@ def new_enemy(list,c,i=0):
         if list==[]:
             list.append(character.boss0(WINDOW_WIDTH//2,0,0.5,
                                          60,True,
-                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],5000,(255, 0, 0),1))
+                                         [0,0,WINDOW_WIDTH,WINDOW_HEIGHT],5000,(255, 0, 0),1,
+                                         volume=volume))
 
 def show_heath(character,good=False):
     #print(character.full_health,character.health)
@@ -56,18 +142,24 @@ def show_heath(character,good=False):
 
 def draw_image(image_path, x, y, size):
     size=size*math.sqrt(2)/2
-    # 加载图像
-    image = pygame.image.load(image_path)
-    # 缩放图像到指定大小
-    image = pygame.transform.scale(image, (size, size))
-    # 获取图像矩形对象
+    try:
+        image = pygame.image.load(image_path)
+        image = pygame.transform.scale(image, (int(size), int(size)))
+    except (FileNotFoundError, pygame.error):
+        image = pygame.Surface((int(size), int(size)), pygame.SRCALPHA)
+        center = int(size) // 2
+        radius = max(8, int(size * 0.32))
+        pygame.draw.circle(image, (220, 60, 90), (center, center), radius)
+        pygame.draw.circle(image, (255, 210, 80), (center, center), radius, 3)
+        pygame.draw.line(image, (255, 255, 255), (center - radius, center), (center + radius, center), 2)
+        pygame.draw.line(image, (255, 255, 255), (center, center - radius), (center, center + radius), 2)
     image_rect = image.get_rect(center=(x, y))
-    # 绘制图像到屏幕上
     window.blit(image, image_rect)
 
 
 def rungame():
-    channel_sound.play(sound)
+    if AUDIO_ENABLED:
+        channel_sound.play(sound)
     global count
     while True:
         direction=0
@@ -76,9 +168,7 @@ def rungame():
             count=0
         # 处理事件
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
+            handle_event(event)
 
         # 获取按键状态
         keys = pygame.key.get_pressed()
@@ -144,9 +234,10 @@ def rungame():
                     i.show=False
                     if e.health <= 0 and e.boss:
                         # print(10)
-                        channel_crash.play(crash_sound)
+                        if AUDIO_ENABLED:
+                            channel_crash.play(crash_sound)
                         # print("1")
-                if not channel_hit.get_busy():
+                if AUDIO_ENABLED and not channel_hit.get_busy():
                     channel_hit.play(hit_sound)
                     #print(channel_hit.get_busy())
         # 绘制角色
@@ -171,7 +262,8 @@ def rungame():
                     elif b.size + player1.size+5>math.sqrt((b.position_x - player1.position_x) ** 2 + (#擦弹
                             b.position_y - player1.position_y) ** 2) > b.size + player1.size and player1.show:
                         #print("!")
-                        channel_close.play(close_sound)
+                        if AUDIO_ENABLED:
+                            channel_close.play(close_sound)
                     if b.show:
                         pygame.draw.circle(window, b.color, (b.position_x,
                                                                b.position_y), b.size)
@@ -192,21 +284,20 @@ def rungame():
 
         clock.tick(60)
         # 刷新屏幕
-        pygame.display.update()
+        present()
 
 spritesheet = img.load_character_spritesheet("src/img_1.png", 4, 3,50,50)
-close_sound = pygame.mixer.Sound("src/东方原作音效/绀长擦弹.wav")
-hit_sound=pygame.mixer.Sound("src/东方原作音效/莎莎火箭弹命中.wav")
-crash_sound=pygame.mixer.Sound("src/东方原作音效/击破boss.wav")
-sound=pygame.mixer.Sound("src/th15_13.mp3")
-channel_sound = pygame.mixer.Channel(0)
-channel_hit = pygame.mixer.Channel(1)
-channel_close = pygame.mixer.Channel(2)
-channel_crash = pygame.mixer.Channel(3)
-volume=0.01
+close_sound = safe_sound("src/东方原作音效/绀长擦弹.wav")
+hit_sound=safe_sound("src/东方原作音效/莎莎火箭弹命中.wav")
+crash_sound=safe_sound("src/东方原作音效/击破boss.wav")
+sound=safe_sound("src/th15_13.mp3")
+channel_sound = safe_channel(0)
+channel_hit = safe_channel(1)
+channel_close = safe_channel(2)
+channel_crash = safe_channel(3)
+volume=0.01 if AUDIO_ENABLED else 0.0
 sound.set_volume(volume)
 hit_sound.set_volume(volume)
 close_sound.set_volume(volume)
 crash_sound.set_volume(volume)
 rungame()
-

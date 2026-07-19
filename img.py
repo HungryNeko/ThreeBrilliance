@@ -6,15 +6,45 @@ import sys
 # 初始化 Pygame
 pygame.init()
 
-# 设置窗口大小
-WINDOW_WIDTH, WINDOW_HEIGHT = 800, 600
-screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-pygame.display.set_caption("测试显示分割出的图像")
+
+def make_fallback_sprites(rows, cols, width, height):
+    sprites = []
+    colors = [
+        (20, 255, 255),
+        (80, 200, 255),
+        (255, 255, 255),
+        (255, 220, 80),
+        (255, 160, 200),
+        (120, 255, 140),
+        (200, 170, 255),
+        (255, 120, 120),
+        (160, 220, 255),
+    ]
+    for idx in range(rows * cols):
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        color = colors[idx % len(colors)]
+        pygame.draw.polygon(
+            surface,
+            color,
+            [
+                (width // 2, max(2, height // 6)),
+                (max(2, width // 4), height - max(2, height // 5)),
+                (width - max(2, width // 4), height - max(2, height // 5)),
+            ],
+        )
+        pygame.draw.circle(surface, (255, 255, 255), (width // 2, height // 2), max(2, width // 10))
+        sprites.append(surface)
+    return sprites
 
 
 def load_character_spritesheet(image_path, rows, cols, width, height, re=0, resize=None):
     # 加载图像
-    image = pygame.image.load(image_path)
+    try:
+        image = pygame.image.load(image_path)
+    except (FileNotFoundError, pygame.error):
+        fallback_width = int(resize * math.sqrt(2) / 2) if resize is not None else width
+        fallback_height = fallback_width if resize is not None else height
+        return make_fallback_sprites(rows, cols, fallback_width, fallback_height)
     if resize is not None:
         resize = resize * math.sqrt(2) / 2
     # 计算每个子表面的宽度和高度
@@ -26,12 +56,17 @@ def load_character_spritesheet(image_path, rows, cols, width, height, re=0, resi
             rect = pygame.Rect((width + re) * col, (height + re) * row, width, height)
             subsurface = image.subsurface(rect)
             if resize is not None:
-                subsurface = pygame.transform.scale(subsurface, (resize,resize))
+                subsurface = pygame.transform.scale(subsurface, (int(resize), int(resize)))
             sprites.append(subsurface)
     return sprites
 
 
 def main():
+    # 设置窗口大小
+    WINDOW_WIDTH, WINDOW_HEIGHT = 800, 600
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    pygame.display.set_caption("测试显示分割出的图像")
+
     # 加载包含多个人物素材的图片，并指定行数和列数
     spritesheet = load_character_spritesheet("src/img_1.png", 4, 3,50,50)
 
