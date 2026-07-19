@@ -81,6 +81,7 @@ class Train:
         self.best_stage = 0
         self.best_stage_kill = 0
         self.best_stage_kill_boss = 0
+        self.win_count = 0
         self.best_avg_reward = float("-inf")
         self.episode = 0
         self.death_resets = 0
@@ -358,6 +359,7 @@ class Train:
             "stage": self.stage,
             "stage_kill": self.stage_kill,
             "stage_boss_kill": self.stage_kill_boss,
+            "wins": self.win_count,
             "episode": self.episode,
             "death_resets": self.death_resets,
             "boss_stall_resets": self.boss_stall_resets,
@@ -405,6 +407,7 @@ class Train:
             "best_stage": self.best_stage,
             "best_stage_kill": self.best_stage_kill,
             "best_stage_kill_boss": self.best_stage_kill_boss,
+            "win_count": self.win_count,
             "best_avg_reward": self.best_avg_reward,
             "episode": self.episode,
             "death_resets": self.death_resets,
@@ -426,6 +429,7 @@ class Train:
         self.best_stage = int(state.get("best_stage", self.best_stage))
         self.best_stage_kill = int(state.get("best_stage_kill", self.best_stage_kill))
         self.best_stage_kill_boss = int(state.get("best_stage_kill_boss", self.best_stage_kill_boss))
+        self.win_count = int(state.get("win_count", self.win_count))
         self.best_avg_reward = float(state.get("best_avg_reward", self.best_avg_reward))
         self.episode = int(state.get("episode", self.episode))
         self.death_resets = int(state.get("death_resets", self.death_resets))
@@ -461,6 +465,19 @@ class Train:
                 boss_hp += max(0.0, getattr(enemy, "health", 0.0))
                 boss_max_hp += max(1.0, getattr(enemy, "full_health", 1.0))
         return boss_hp / boss_max_hp if boss_max_hp else 0.0
+
+    def _death_penalty(self):
+        return -18000.0 - 12000.0 * self._boss_hp_pct()
+
+    def _apply_action_risk_reward(self, agent, reward, hurt):
+        risk_reward = agent.action_risk_reward(self._last_processed_state, self._last_action, hurt)
+        if risk_reward == 0.0:
+            return reward
+        components = getattr(agent, "last_reward_components", None)
+        if isinstance(components, dict):
+            components["risk_choice"] = risk_reward
+            components["total"] = components.get("total", reward) + risk_reward
+        return reward + risk_reward
 
     def _update_player_homing_targets(self):
         targets = [enemy for enemy in self.enemy_list if getattr(enemy, "show", True)]
@@ -560,7 +577,12 @@ class Train:
             self.WINDOW_WIDTH,
             self.WINDOW_HEIGHT,
         )
+        reward = self._apply_action_risk_reward(agent, reward, self.last_time_hurt)
         reward += penalty
+        components = getattr(agent, "last_reward_components", None)
+        if isinstance(components, dict):
+            components["terminal"] = penalty
+            components["total"] = reward
         self.last_reward = reward
         self.total_reward += reward
         self.reward_steps += 1
@@ -571,7 +593,7 @@ class Train:
 
     def _handle_terminal_state(self, agent):
         if self.player1.health <= 0:
-            self._learn_terminal_transition(agent, "death", -8000.0)
+            self._learn_terminal_transition(agent, "death", self._death_penalty())
             self._reset_episode("death")
             return True
         if self._update_boss_stall_counter():
@@ -587,6 +609,7 @@ class Train:
                 f"step={metrics['step']}",
                 f"prog={metrics['progress']}",
                 f"best={metrics['best_progress']}",
+                f"win={metrics['wins']}",
                 f"avg={metrics['avg_reward']:.1f}",
                 f"best_avg={metrics['best_avg_reward']:.1f}",
                 f"reset={metrics['death_resets']}/{metrics['boss_stall_resets']}",
@@ -621,11 +644,16 @@ class Train:
                     self.WINDOW_WIDTH,
                     self.WINDOW_HEIGHT
                 )
+                reward = self._apply_action_risk_reward(agent, reward, self.last_time_hurt)
                 enemies_alive_for_reward = len(self.enemy_list) > 0
                 if self._had_enemies_for_reward and not enemies_alive_for_reward:
                     reward += 100  # 消灭所有敌人奖励
                 self._had_enemies_for_reward = enemies_alive_for_reward
                 reward += self._update_boss_time_penalty()
+                components = getattr(agent, "last_reward_components", None)
+                if isinstance(components, dict):
+                    components["boss_time"] = self.last_boss_time_penalty
+                    components["total"] = reward
                 self.last_reward = reward
                 self.total_reward += reward
                 self.reward_steps += 1
@@ -781,14 +809,17 @@ class Train:
                     dx = i.position_x - e.position_x
                     dy = e.position_y - i.position_y
                     if dx * dx + dy * dy < hit_radius * hit_radius and e.show:
+                        was_alive = e.health > 0
                         e.change_health(-i.power)
                         reward_power = getattr(i, "reward_power", i.power)
                         if e.boss:
                             self.last_time_boss_damage += i.power
-                        if e.health<=0:
+                        if was_alive and e.health <= 0:
                             self.stage_kill += 1
                             if e.boss:
-                                self.stage_kill_boss+=1
+                                self.stage_kill_boss += 1
+                                if self.stage == 4:
+                                    self.win_count += 1
                         self.last_time_hit += reward_power
                         self.total_hit_power += reward_power
                         self.window_hit_power += reward_power

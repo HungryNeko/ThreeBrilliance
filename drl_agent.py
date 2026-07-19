@@ -124,12 +124,17 @@ class DRLAgent:
         self.safety_lookahead_frames = (1, 2, 4, 6, 8)
         self.safety_penalty_scale = 6000.0
         self.use_attack_prior = True
-        self.attack_prior_scale = 900.0
-        self.boss_attack_prior_scale = 2600.0
+        self.attack_prior_scale = 300.0
+        self.boss_attack_prior_scale = 700.0
         self.attack_vertical_min = 40.0
         self.attack_under_distance = 260.0
         self.attack_under_band = 180.0
-        self.boss_position_reward_scale = 120.0
+        self.boss_position_reward_scale = 35.0
+        self.hit_reward_scale = 40.0
+        self.hurt_penalty_scale = 300.0
+        self.low_risk_bonus_scale = 12.0
+        self.risk_choice_penalty_scale = 45.0
+        self.low_risk_tolerance = 0.08
 
         self.grid_width = 60
         self.grid_height = 90
@@ -444,18 +449,21 @@ class DRLAgent:
             wall_reward_coef = 0.2
 
         aim_left, aim_center, aim_right, aim_alignment, aim_dist = aim_features
-        base_reward = hit * 100.0 + hurt * -150.0
+        hit_reward = hit * self.hit_reward_scale
+        hurt_reward = hurt * -self.hurt_penalty_scale
+        base_reward = hit_reward + hurt_reward
         aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.3 + aim_alignment * 1.0) * 0.4
         boss_position_reward = self._get_boss_position_reward(x, y, enemy_list)
         wall_reward = -wall_penalty * (1.0 if enemies_alive else 3.0)
         reward = (base_reward + aim_reward + boss_position_reward + wall_reward) * wall_reward_coef
         self.last_reward_components = {
-            "hit": hit * 100.0,
-            "hurt": hurt * -150.0,
+            "hit": hit_reward,
+            "hurt": hurt_reward,
             "aim": aim_reward,
             "boss_position": boss_position_reward,
             "wall": wall_reward,
             "wall_coef": wall_reward_coef,
+            "risk_choice": 0.0,
             "total": reward,
         }
 
@@ -493,6 +501,23 @@ class DRLAgent:
             *aim_features,       # 14-18
         )
         return GridState(grid=grid, local_grid=local_grid, vector=vector, features=features), reward
+
+    def action_risk_reward(self, state, action, hurt):
+        if state is None or action is None or action >= 8:
+            return 0.0
+        if len(state) < 8:
+            return 0.0
+
+        risks = [max(0.0, min(1.0, float(v))) for v in state.features[:8]]
+        if max(risks) < 0.02:
+            return 0.0
+
+        selected_risk = risks[action]
+        best_risk = min(risks)
+        reward = -(selected_risk - best_risk) * self.risk_choice_penalty_scale
+        if hurt <= 0 and selected_risk <= best_risk + self.low_risk_tolerance:
+            reward += self.low_risk_bonus_scale * (1.0 - selected_risk)
+        return reward
 
     def _encode_grid(self, enemy_list, x, y, wall_x, wall_y):
         grid = np.zeros((self.grid_channels, self.grid_height, self.grid_width), dtype=np.float32)
