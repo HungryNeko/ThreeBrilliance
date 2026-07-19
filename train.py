@@ -59,11 +59,11 @@ class Train:
         self.overlay_mode = 2
         self.debug_font = pygame.font.SysFont(None, 18) if self.visual else None
         self.debug_font_small = pygame.font.SysFont(None, 16) if self.visual else None
-        self.fast_training = True
-        self.frame_cap = 0
+        self.fast_training = self.headless
+        self.frame_cap = 0 if self.headless else 60
         self.render_every = render_every
         self.log_every = log_every
-        self.audio_enabled = False
+        self.audio_enabled = self.visual
         self._image_cache = {}
         self.player1 = character.player(self.WINDOW_WIDTH // 2, self.WINDOW_HEIGHT // 2,
                                         10, 5, True,
@@ -86,6 +86,7 @@ class Train:
         self.death_resets = 0
         self.boss_stall_resets = 0
         self.last_terminal_reason = ""
+        self.last_time_boss_damage = 0
         self.boss_no_hit_frames = 0
         self.boss_low_hp_no_hit_frames = 0
         self.boss_stall_hp_pct = 0.35
@@ -302,6 +303,21 @@ class Train:
             self.display = pygame.display.set_mode(self.display_size, pygame.RESIZABLE)
         elif event.key == pygame.K_r:
             self.overlay_mode = (self.overlay_mode + 1) % 3
+        elif event.key == pygame.K_m:
+            self._toggle_audio()
+
+    def _toggle_audio(self):
+        if not self.visual:
+            return
+        self.audio_enabled = not self.audio_enabled
+        self.volume = 0.5 if self.audio_enabled else 0.0
+        for sound in (self.sound, self.hit_sound, self.close_sound, self.crash_sound):
+            if sound is not None:
+                sound.set_volume(self.volume)
+        if self.audio_enabled:
+            self.channel_sound.play(self.sound, -1)
+        else:
+            self.channel_sound.stop()
 
     def _should_render_frame(self):
         if not self.visual:
@@ -368,6 +384,7 @@ class Train:
             "action": decision.get("action", self.action),
             "action_label": decision.get("action_label", ""),
             "boss_alive_frames": self.boss_alive_frames,
+            "boss_damage": self.last_time_boss_damage,
             "boss_no_hit_frames": self.boss_no_hit_frames,
             "boss_low_hp_no_hit_frames": self.boss_low_hp_no_hit_frames,
             "boss_time_penalty": self.last_boss_time_penalty,
@@ -474,7 +491,7 @@ class Train:
             self.boss_no_hit_frames = 0
             self.boss_low_hp_no_hit_frames = 0
             return False
-        if self.last_time_hit > 0:
+        if self.last_time_boss_damage > 0 or self.last_time_hit > 0:
             self.boss_no_hit_frames = 0
             self.boss_low_hp_no_hit_frames = 0
             return False
@@ -530,6 +547,7 @@ class Train:
         self.action = 8
         self.last_time_hit = 0
         self.last_time_hurt = 0
+        self.last_time_boss_damage = 0
 
     def _learn_terminal_transition(self, agent, reason, penalty):
         if self._last_processed_state is None or self._last_action is None:
@@ -644,12 +662,12 @@ class Train:
             # 5. 重置命中/受伤计数器
             self.last_time_hit = 0
             self.last_time_hurt = 0
+            self.last_time_boss_damage = 0
             #print(action)
 
     def run(self):
         if self.visual and self.audio_enabled:
-            #self.channel_sound.play(self.sound)
-            pass
+            self.channel_sound.play(self.sound, -1)
         #time.sleep(10)
         while True:
             self.action1()
@@ -696,6 +714,7 @@ class Train:
 
             self.last_time_hit = 0
             self.last_time_hurt = 0
+            self.last_time_boss_damage = 0
 
             should_render = self._should_render_frame()
             if should_render:
@@ -708,8 +727,6 @@ class Train:
                 self.stage_kill_boss = 0
                 self.stage_kill=0
             elif self.stage==1 and self.stage_kill>10 and not self.boss_exist:
-                if self.audio_enabled:
-                    self.sound.play(-1)
                 self.stage=2
                 self.stage_kill=0
                 self.stage_kill_boss = 0
@@ -766,6 +783,8 @@ class Train:
                     if dx * dx + dy * dy < hit_radius * hit_radius and e.show:
                         e.change_health(-i.power)
                         reward_power = getattr(i, "reward_power", i.power)
+                        if e.boss:
+                            self.last_time_boss_damage += i.power
                         if e.health<=0:
                             self.stage_kill += 1
                             if e.boss:
@@ -904,17 +923,10 @@ class Train:
         overlay = pygame.Surface((self.WINDOW_WIDTH, self.WINDOW_HEIGHT), pygame.SRCALPHA)
         x = self.player1.position_x
         y = self.player1.position_y
-        d = agent.direction_range
-        diag = d / math.sqrt(2)
-        directions = [
-            (x - diag, y - diag), (x, y - d), (x + diag, y - diag),
-            (x + d, y), (x + diag, y + diag), (x, y + d),
-            (x - diag, y + diag), (x - d, y), (x, y),
-        ]
         action_delta = [
             (-1, -1), (0, -1), (1, -1),
             (1, 0), (1, 1), (0, 1),
-            (-1, 1), (-1, 0), (0, 0),
+            (-1, 1), (-1, 0),
         ]
         decision = getattr(agent, "last_decision", {})
         action = decision.get("action")
@@ -937,20 +949,22 @@ class Train:
         pygame.draw.line(overlay, (255, 245, 180, 140), (x, y), center_end, 1)
 
         for idx, (dx, dy) in enumerate(action_delta):
-            if dx == 0 and dy == 0:
-                continue
             norm = math.hypot(dx, dy)
             end_x = x + dx / norm * agent.max_lookahead
             end_y = y + dy / norm * agent.max_lookahead
             pygame.draw.line(overlay, (80, 180, 255, 60), (x, y), (end_x, end_y), 1)
 
-        for idx, (cx, cy) in enumerate(directions):
-            rect = pygame.Rect(int(cx - d), int(cy - d), int(2 * d), int(2 * d))
-            color = (0, 255, 120, 210) if idx == action else (255, 255, 255, 130)
-            pygame.draw.rect(overlay, color, rect, 1)
-            count = int(state[idx]) if state else 0
-            label = self.debug_font_small.render(str(count), True, color[:3])
-            overlay.blit(label, (int(cx + 3), int(cy - 10)))
+        for idx, (dx, dy) in enumerate(action_delta):
+            norm = math.hypot(dx, dy)
+            cx = x + dx / norm * 44
+            cy = y + dy / norm * 44
+            risk = float(state[idx]) if state and idx < len(state) else 0.0
+            color = (255, 80, 80, 220) if risk > 0.6 else (255, 210, 80, 180) if risk > 0.25 else (0, 255, 120, 150)
+            if idx == action:
+                color = (80, 180, 255, 230)
+            pygame.draw.circle(overlay, color, (int(cx), int(cy)), 14, 1)
+            label = self.debug_font_small.render(f"{risk:.1f}", True, color[:3])
+            overlay.blit(label, (int(cx + 10), int(cy - 8)))
 
         pygame.draw.circle(overlay, (0, 140, 255, 220), (int(x), int(y)), 4)
         self.window.blit(overlay, (0, 0))
@@ -963,20 +977,18 @@ class Train:
         action_priors = decision.get("action_priors", tuple(0.0 for _ in range(agent.action_size)))
         action = decision.get("action", self.action)
         action_label = decision.get("action_label", str(action))
-        bullet_counts = tuple(int(v) for v in state[:9]) if state else tuple(0 for _ in range(9))
-        threat_scores = tuple(float(v) for v in state[9:18]) if state else tuple(0.0 for _ in range(9))
-        aim_features = tuple(state[24:29]) if state and len(state) >= 29 else (0, 0, 0, 0.0, 1.0)
+        direction_risks = tuple(float(v) for v in state[:8]) if state else tuple(0.0 for _ in range(8))
+        aim_features = tuple(state[14:19]) if state and len(state) >= 19 else (0, 0, 0, 0.0, 1.0)
         reward = getattr(agent, "last_reward_components", {})
 
         lines = [
             f"RL policy: {decision.get('policy_mode', 'pure-q')} | hard rules: {'ON' if agent.use_hard_rules else 'OFF'}",
             f"Candidates: {list(candidates)} | action: {action} {action_label} | eps: {agent.epsilon:.3f}",
-            f"Input range: 9 boxes {agent.direction_range * 2}px, threat lookahead {agent.max_lookahead}px, wall band {agent.wall_repulse_dist}px",
+            f"Move risk: 8 dirs, horizons {agent.direction_risk_horizons}, wall band {agent.wall_repulse_dist}px",
             f"Shot cone: +/-{agent.shot_cone_angle_degrees}deg, range {agent.shot_range}px | L/C/R enemies: {int(aim_features[0])}/{int(aim_features[1])}/{int(aim_features[2])}",
             f"Aim align: {float(aim_features[3]):.2f} | nearest in cone: {float(aim_features[4]):.2f} range",
-            f"Input dims: bullets[0:9], threat[9:18], player x/y, enemy rel x/y, wall w/h, aim[24:28]",
-            f"Bullets: {bullet_counts}",
-            "Threat: " + ", ".join(f"{v:.1f}" if v < 999999 else "inf" for v in threat_scores),
+            "Input dims: move_risk[0:8], player x/y, enemy rel x/y, wall w/h, aim[14:18]",
+            "Risk: " + ", ".join(f"{v:.2f}" for v in direction_risks),
             "Q: " + ", ".join(f"{i}:{q_values[i]:.1f}" for i in range(agent.action_size)),
             "Prior: " + ", ".join(f"{i}:{action_priors[i]:.1f}" for i in range(agent.action_size)),
             "Q+prior: " + ", ".join(f"{i}:{adjusted_values[i]:.1f}" for i in range(agent.action_size)),

@@ -112,13 +112,15 @@ class DRLAgent:
         self.wall_repulse_dist = 100
         self.threat_angle_degrees = 10
         self.shot_range = 900
-        self.shot_cone_angle_degrees = 14
-        self.shot_center_angle_degrees = 4
+        self.shot_cone_angle_degrees = 7
+        self.shot_center_angle_degrees = 2
         self.use_hard_rules = False
-        self.use_safety_prior = True
+        self.use_safety_prior = False
         self.player_radius = 5
         self.action_step = 10
         self.safety_margin = 22
+        self.direction_risk_horizons = (0, 3, 6, 10, 14, 20, 28)
+        self.direction_risk_margin = 14
         self.safety_lookahead_frames = (1, 2, 4, 6, 8)
         self.safety_penalty_scale = 6000.0
         self.use_attack_prior = True
@@ -135,7 +137,7 @@ class DRLAgent:
         self.local_grid_size = 64
         self.local_grid_channels = 8
         self.local_world_radius = 260
-        self.vector_size = 14
+        self.vector_size = 22
         self._grid_cache = {}
         self._local_wall_lens_cache = {}
         self.device = self._select_device(device)
@@ -236,7 +238,7 @@ class DRLAgent:
         return action
 
     def _action_attack_priors(self, state, enemy_list):
-        if state is None or len(state) < 20:
+        if state is None or len(state) < 10:
             return np.zeros(self.action_size, dtype=np.float32)
 
         targets = [enemy for enemy in enemy_list if getattr(enemy, "show", True)]
@@ -244,8 +246,8 @@ class DRLAgent:
             return np.zeros(self.action_size, dtype=np.float32)
 
         bosses = [enemy for enemy in targets if getattr(enemy, "boss", False)]
-        x = float(state[18])
-        y = float(state[19])
+        x = float(state[8])
+        y = float(state[9])
         target = min(bosses or targets, key=lambda enemy: abs(enemy.position_x - x) + abs(enemy.position_y - y))
         dy_up = y - float(target.position_y)
         if dy_up > self.shot_range:
@@ -286,11 +288,11 @@ class DRLAgent:
         return priors
 
     def _action_safety_priors(self, state, enemy_list):
-        if state is None or len(state) < 20:
+        if state is None or len(state) < 10:
             return np.zeros(self.action_size, dtype=np.float32)
 
-        x = float(state[18])
-        y = float(state[19])
+        x = float(state[8])
+        y = float(state[9])
         action_delta = (
             (-1, -1), (0, -1), (1, -1),
             (1, 0), (1, 1), (0, 1),
@@ -417,8 +419,7 @@ class DRLAgent:
         self.wall_y = wall_y
         x, y = player_pos
 
-        bullet_counts = self._get_local_bullet_counts(enemy_list, x, y)
-        threat_scores = self._get_direction_threat(x, y, wall_x, wall_y, enemy_list)
+        direction_risks = self._get_direction_risk_scores(x, y, wall_x, wall_y, enemy_list)
         norm_ex, norm_ey, enemy_count = self._closest_enemy_features(enemy_list, x, y, wall_x, wall_y)
         aim_features = self._get_shot_cone_features(x, y, wall_x, wall_y, enemy_list)
         grid = self._encode_grid(enemy_list, x, y, wall_x, wall_y)
@@ -472,6 +473,7 @@ class DRLAgent:
                 norm_ey,
                 min(1.0, enemy_count / 10.0),
                 min(1.0, bullet_total / 300.0),
+                *direction_risks,
                 min(1.0, max(0.0, hit / 100.0)),
                 min(1.0, max(0.0, hurt / 100.0)),
                 min(1.0, aim_left / 3.0),
@@ -484,12 +486,11 @@ class DRLAgent:
             dtype=np.float32,
         )
         features = (
-            *bullet_counts,      # 0-8
-            *threat_scores,      # 9-17
-            x, y,                # 18-19
-            norm_ex, norm_ey,    # 20-21
-            wall_x, wall_y,      # 22-23
-            *aim_features,       # 24-28
+            *direction_risks,    # 0-7
+            x, y,                # 8-9
+            norm_ex, norm_ey,    # 10-11
+            wall_x, wall_y,      # 12-13
+            *aim_features,       # 14-18
         )
         return GridState(grid=grid, local_grid=local_grid, vector=vector, features=features), reward
 
@@ -666,28 +667,41 @@ class DRLAgent:
         self._grid_cache[key] = cached
         return cached
 
-    def _get_local_bullet_counts(self, enemy_list, x, y):
-        d = self.direction_range
-        diag = d / math.sqrt(2)
-        directions = [
-            (x - diag, y - diag), (x, y - d), (x + diag, y - diag),
-            (x + d, y), (x + diag, y + diag), (x, y + d),
-            (x - diag, y + diag), (x - d, y), (x, y),
+    def _get_direction_risk_scores(self, x, y, wall_x, wall_y, enemy_list):
+        action_delta = [
+            (-1, -1), (0, -1), (1, -1),
+            (1, 0), (1, 1), (0, 1),
+            (-1, 1), (-1, 0),
         ]
-        counts = [0] * 9
-        for enemy in enemy_list:
-            for bullet in enemy.bullets:
-                if not getattr(bullet, "show", False):
-                    continue
-                bx, by = bullet.position_x, bullet.position_y
-                bsize = getattr(bullet, "size", 0)
-                for i, (zone_x, zone_y) in enumerate(directions):
-                    radius = d + bsize
-                    dx = bx - zone_x
-                    dy = by - zone_y
-                    if dx * dx + dy * dy <= radius * radius:
-                        counts[i] += 1
-        return counts
+        risks = [0.0] * 8
+        bullets = [
+            bullet
+            for enemy in enemy_list
+            for bullet in enemy.bullets
+            if getattr(bullet, "show", False)
+        ]
+        for idx, (adx, ady) in enumerate(action_delta):
+            score = 0.0
+            for horizon in self.direction_risk_horizons:
+                px = min(wall_x, max(0.0, x + adx * self.action_step * horizon))
+                py = min(wall_y, max(0.0, y + ady * self.action_step * horizon))
+                wall_dist = min(px, wall_x - px, py, wall_y - py)
+                if wall_dist < self.wall_repulse_dist:
+                    score += 0.15 * (1.0 - max(0.0, wall_dist) / self.wall_repulse_dist)
+                for bullet in bullets:
+                    bx = float(bullet.position_x)
+                    by = float(bullet.position_y)
+                    bvx, bvy = self._bullet_velocity(bullet)
+                    future_bx = bx + bvx * horizon
+                    future_by = by + bvy * horizon
+                    radius = self.player_radius + float(getattr(bullet, "size", 0.0)) + self.direction_risk_margin
+                    dist = math.hypot(future_bx - px, future_by - py)
+                    if dist < radius:
+                        score += 1.0 + (radius - dist) / max(1.0, radius)
+                    elif dist < radius * 3.0:
+                        score += 0.25 * (1.0 - (dist - radius) / max(1.0, radius * 2.0))
+            risks[idx] = min(1.0, score / max(1.0, len(self.direction_risk_horizons)))
+        return risks
 
     def _closest_enemy_features(self, enemy_list, x, y, wall_x, wall_y):
         enemies = [e for e in enemy_list if getattr(e, "show", True)]

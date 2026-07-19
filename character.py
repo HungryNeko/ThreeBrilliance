@@ -14,6 +14,9 @@ class NullSound:
     def set_volume(self, volume):
         pass
 
+    def play(self, *args, **kwargs):
+        return None
+
 
 class NullChannel:
     def play(self, sound):
@@ -21,6 +24,9 @@ class NullChannel:
 
     def get_busy(self):
         return False
+
+    def stop(self):
+        pass
 
 
 class SafeChannel:
@@ -34,6 +40,9 @@ class SafeChannel:
 
     def get_busy(self):
         return self.channel.get_busy()
+
+    def stop(self):
+        return self.channel.stop()
 
 
 def safe_sound(path, volume=0.0):
@@ -80,13 +89,13 @@ class player(objects.character):
                             shoot.bullets(self.position_x-20, self.position_y, 10, 8, False, self.range, 500, "up", 0, 0, 20, i,color=(255, 255,0)))
                     if self.count % 6 == 0 and self.level > 3:
                         self.bullets.append(
-                            shoot.bullets(self.position_x + 10, self.position_y, 12, 4, False, self.range, 500,
-                                          "homing_curve", 0, 0, 4, i, color=(90, 220, 255),
-                                          reward_power=0, max_turn_degrees=2.5))
+                            shoot.bullets(self.position_x + 10, self.position_y, 12, 4, False, self.range, 20,
+                                          "homing_curve", 0, 0, 10, i, color=(90, 220, 255),
+                                          reward_power=0, max_turn_degrees=1.5))
                         self.bullets.append(
-                            shoot.bullets(self.position_x - 10, self.position_y, 12, 4, False, self.range, 500,
-                                          "homing_curve", 0, 0, 4, i, color=(90, 220, 255),
-                                          reward_power=0, max_turn_degrees=2.5))
+                            shoot.bullets(self.position_x - 10, self.position_y, 12, 4, False, self.range, 20,
+                                          "homing_curve", 0, 0, 10, i, color=(90, 220, 255),
+                                          reward_power=0, max_turn_degrees=1.5))
 
 
 class enemy0(objects.character):
@@ -162,7 +171,7 @@ class boss1(enemy0):
 
     def shoot(self,x,y):
         if self.show==True:
-            if self.count % 8 == 0:
+            if self.count % 3 == 0 and self.count%60<=24:
                 base_angle = self.count / 90.0
                 group_count = 6
                 bullets_per_group = 5
@@ -180,17 +189,17 @@ class boss1(enemy0):
                     self.channel_card.play(self.boss_card_sound)
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10, "angle_en",
-                                      self.position_x + math.sin(i * 7.2 + self.count / self.fire_rate / 5),
-                                      self.position_y + math.cos(i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
-            if self.count%8==0:#反向旋转
+                                    self.position_x + math.sin(i * 7.2 + self.count / self.fire_rate / 5),
+                                    self.position_y + math.cos(i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
+            if self.count%2==0 and self.count%50<=16:#反向旋转
                 for i in range(-2, 1):
                     # self.bullets.append(shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10,"angle_en",x+i*100,y,5))
                     self.bullets.append(
-                        shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 10, "angle_en",
+                        shoot.bullets(self.position_x, self.position_y, 1.5, 5, False, self.range, 10, "angle_en",
                                       self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300),
                                       self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300), 5,color=(255,165,0)))
                     self.bullets.append(
-                        shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 10, "angle_en",
+                        shoot.bullets(self.position_x, self.position_y, 1.5, 5, False, self.range, 10, "angle_en",
                                       self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300+30),
                                       self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300+30), 5,
                                       color=(255, 165, 0)))
