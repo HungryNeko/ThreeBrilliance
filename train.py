@@ -445,6 +445,28 @@ class Train:
                 boss_max_hp += max(1.0, getattr(enemy, "full_health", 1.0))
         return boss_hp / boss_max_hp if boss_max_hp else 0.0
 
+    def _update_player_homing_targets(self):
+        targets = [enemy for enemy in self.enemy_list if getattr(enemy, "show", True)]
+        if not targets:
+            return
+        bosses = [enemy for enemy in targets if getattr(enemy, "boss", False)]
+        for bullet in self.player1.bullets:
+            if getattr(bullet, "move_func", None) != "homing_curve" or not getattr(bullet, "show", False):
+                continue
+            candidates = [
+                enemy
+                for enemy in (bosses or targets)
+                if enemy.position_y <= bullet.position_y + 120
+            ]
+            if not candidates:
+                candidates = bosses or targets
+            target = min(
+                candidates,
+                key=lambda enemy: abs(enemy.position_x - bullet.position_x) + abs(enemy.position_y - bullet.position_y),
+            )
+            bullet.homing_target_x = target.position_x
+            bullet.homing_target_y = target.position_y
+
     def _update_boss_stall_counter(self):
         boss_pct = self._boss_hp_pct()
         boss_alive = boss_pct > 0.0
@@ -643,7 +665,7 @@ class Train:
             bullet_count_before_shoot = len(self.player1.bullets)
             self.player1.shoot(shift)
             new_player_bullets = self.player1.bullets[bullet_count_before_shoot:]
-            shot_power = sum(getattr(bullet, "power", 0.0) for bullet in new_player_bullets)
+            shot_power = sum(getattr(bullet, "reward_power", getattr(bullet, "power", 0.0)) for bullet in new_player_bullets)
             self.total_shot_power += shot_power
             self.window_shot_power += shot_power
             if self.action == 0:  # 左上
@@ -721,6 +743,7 @@ class Train:
                                 self.draw_image('src/img.png', e.position_x, e.position_y - 25, e.size + 100)
                         elif should_render:
                             pygame.draw.circle(self.window, e.color, (e.position_x, e.position_y), e.size)
+            self._update_player_homing_targets()
             self.player1.update_bullets()
 
             for i1, i in enumerate(self.player1.bullets):
@@ -742,13 +765,14 @@ class Train:
                     dy = e.position_y - i.position_y
                     if dx * dx + dy * dy < hit_radius * hit_radius and e.show:
                         e.change_health(-i.power)
+                        reward_power = getattr(i, "reward_power", i.power)
                         if e.health<=0:
                             self.stage_kill += 1
                             if e.boss:
                                 self.stage_kill_boss+=1
-                        self.last_time_hit+=i.power
-                        self.total_hit_power += i.power
-                        self.window_hit_power += i.power
+                        self.last_time_hit += reward_power
+                        self.total_hit_power += reward_power
+                        self.window_hit_power += reward_power
 
                         i.show = False
                         if e.health <= 0 and e.boss:

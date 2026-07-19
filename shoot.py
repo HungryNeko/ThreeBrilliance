@@ -5,27 +5,33 @@ import objects
 import move_funcs
 class bullets(objects.objects):
     def __init__(self, position_x=0, position_y=0, speed=5, size=5,
-                 check_in=True, range=[0, 0, 400, 800], disappear=10, move_func=1,p_x=0,p_y=0,power=5,i=1,record=0,color=(255,255,255)):
+                 check_in=True, range=[0, 0, 400, 800], disappear=10, move_func=1,p_x=0,p_y=0,power=5,i=1,record=0,color=(255,255,255),
+                 reward_power=None, max_turn_degrees=0):
         super().__init__(position_x, position_y, speed, size, check_in, range)
         self.disappear=disappear
         self.move_func=move_func
         self.record=[position_x,position_y,speed,record,p_x,p_y,i]
         self.power=power
+        self.reward_power = power if reward_power is None else reward_power
         self.show=True
         self.color=color
         self.next_position=[]
         self.last_x = self.record[0]
         self.last_y = self.record[1]
-        self.position_x=0
-        self.position_y=0
+        self.position_x=position_x
+        self.position_y=position_y
         self.count=0
+        self.heading = -math.pi / 2
+        self.max_turn = math.radians(max_turn_degrees)
+        self.homing_target_x = None
+        self.homing_target_y = None
 
 
     def move(self,target=None):
         self.count+=1
         if self.count==5:
-            self.last_x=self.record[0]
-            self.last_y=self.record[1]
+            self.last_x=self.position_x
+            self.last_y=self.position_y
             self.count=0
         #print(self.move_func)
         if self.move_func=="up":
@@ -46,6 +52,8 @@ class bullets(objects.objects):
             self.position_x, self.position_y = move_funcs.angle(self.record,x3,y3)
         elif self.move_func=='angle_degree':
             self.position_x,self.position_y=move_funcs.angle_degree(self.record)
+        elif self.move_func == "homing_curve":
+            self.position_x, self.position_y = self._move_homing_curve()
         else:
             self.position_x, self.position_y = move_funcs.move_up(self.record)
             #print(self.position_x, self.position_y)
@@ -80,6 +88,29 @@ class bullets(objects.objects):
             return move_funcs.angle(newre,x3,y3)
         elif self.move_func=='angle_degree':
             return move_funcs.angle_degree(newre)
+        elif self.move_func == "homing_curve":
+            return self.position_x, self.position_y
         else:
             return move_funcs.move_up(newre)
             #print(self.position_x, self.position_y)
+
+    def _move_homing_curve(self):
+        if self.homing_target_x is not None and self.homing_target_y is not None:
+            desired = math.atan2(self.homing_target_y - self.position_y, self.homing_target_x - self.position_x)
+            delta = self._angle_delta(desired, self.heading)
+            if self.max_turn > 0:
+                delta = max(-self.max_turn, min(self.max_turn, delta))
+            self.heading += delta
+        return (
+            self.position_x + math.cos(self.heading) * self.speed,
+            self.position_y + math.sin(self.heading) * self.speed,
+        )
+
+    @staticmethod
+    def _angle_delta(target, current):
+        delta = target - current
+        while delta > math.pi:
+            delta -= 2 * math.pi
+        while delta < -math.pi:
+            delta += 2 * math.pi
+        return delta

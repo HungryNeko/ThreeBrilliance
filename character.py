@@ -78,6 +78,15 @@ class player(objects.character):
                             shoot.bullets(self.position_x+20, self.position_y, 10, 8, False, self.range, 500, "up", 0, 0, 20, i,color=(255, 255,0)))
                         self.bullets.append(
                             shoot.bullets(self.position_x-20, self.position_y, 10, 8, False, self.range, 500, "up", 0, 0, 20, i,color=(255, 255,0)))
+                    if self.count % 6 == 0 and self.level > 3:
+                        self.bullets.append(
+                            shoot.bullets(self.position_x + 10, self.position_y, 12, 4, False, self.range, 500,
+                                          "homing_curve", 0, 0, 4, i, color=(90, 220, 255),
+                                          reward_power=0, max_turn_degrees=2.5))
+                        self.bullets.append(
+                            shoot.bullets(self.position_x - 10, self.position_y, 12, 4, False, self.range, 500,
+                                          "homing_curve", 0, 0, 4, i, color=(90, 220, 255),
+                                          reward_power=0, max_turn_degrees=2.5))
 
 
 class enemy0(objects.character):
@@ -153,12 +162,19 @@ class boss1(enemy0):
 
     def shoot(self,x,y):
         if self.show==True:
-            if self.count%3==0:
-                for i in range(-5,6):#旋转
-                    #self.bullets.append(shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10,"angle_en",x+i*100,y,5))
-                    self.bullets.append(
-                        shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 20, "angle_en",
-                                      self.position_x + math.sin(i * 36+self.count/self.fire_rate/20), self.position_y+math.cos(i * 36+self.count/self.fire_rate/20), 5))
+            if self.count % 8 == 0:
+                base_angle = self.count / 90.0
+                group_count = 6
+                bullets_per_group = 5
+                tight_step = math.radians(3.0)
+                for group in range(group_count):
+                    group_angle = base_angle + group * (2 * math.pi / group_count)
+                    for offset in range(-(bullets_per_group // 2), bullets_per_group // 2 + 1):
+                        angle = group_angle + offset * tight_step
+                        self.bullets.append(
+                            shoot.bullets(self.position_x, self.position_y, 3, 5, False, self.range, 20, "angle_en",
+                                          self.position_x + math.cos(angle),
+                                          self.position_y + math.sin(angle), 5))
             for i in range(-50, 60):#画圈
                 if self.count % 80 == 0:
                     self.channel_card.play(self.boss_card_sound)
