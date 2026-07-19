@@ -119,8 +119,9 @@ class DRLAgent:
         self.player_radius = 5
         self.action_step = 10
         self.safety_margin = 22
-        self.direction_risk_horizons = (0, 3, 6, 10, 14, 20, 28)
-        self.direction_risk_margin = 14
+        self.direction_risk_horizons = (0, 3, 6, 10, 14, 20, 28, 36)
+        self.direction_risk_margin = 8
+        self.direction_risk_falloff = 48.0
         self.safety_lookahead_frames = (1, 2, 4, 6, 8)
         self.safety_penalty_scale = 6000.0
         self.use_attack_prior = True
@@ -132,9 +133,9 @@ class DRLAgent:
         self.boss_position_reward_scale = 35.0
         self.hit_reward_scale = 40.0
         self.hurt_penalty_scale = 300.0
-        self.low_risk_bonus_scale = 12.0
-        self.risk_choice_penalty_scale = 45.0
-        self.low_risk_tolerance = 0.08
+        self.low_risk_bonus_scale = 2.0
+        self.risk_choice_penalty_scale = 30.0
+        self.low_risk_tolerance = 0.16
 
         self.grid_width = 60
         self.grid_height = 90
@@ -706,13 +707,19 @@ class DRLAgent:
             if getattr(bullet, "show", False)
         ]
         for idx, (adx, ady) in enumerate(action_delta):
-            score = 0.0
+            weighted_risk = 0.0
+            total_weight = 0.0
             for horizon in self.direction_risk_horizons:
                 px = min(wall_x, max(0.0, x + adx * self.action_step * horizon))
                 py = min(wall_y, max(0.0, y + ady * self.action_step * horizon))
                 wall_dist = min(px, wall_x - px, py, wall_y - py)
+                horizon_weight = 1.0 / math.sqrt(1.0 + horizon * 0.18)
+                horizon_risk = 0.0
                 if wall_dist < self.wall_repulse_dist:
-                    score += 0.15 * (1.0 - max(0.0, wall_dist) / self.wall_repulse_dist)
+                    horizon_risk = max(
+                        horizon_risk,
+                        0.35 * (1.0 - max(0.0, wall_dist) / self.wall_repulse_dist),
+                    )
                 for bullet in bullets:
                     bx = float(bullet.position_x)
                     by = float(bullet.position_y)
@@ -721,11 +728,17 @@ class DRLAgent:
                     future_by = by + bvy * horizon
                     radius = self.player_radius + float(getattr(bullet, "size", 0.0)) + self.direction_risk_margin
                     dist = math.hypot(future_bx - px, future_by - py)
-                    if dist < radius:
-                        score += 1.0 + (radius - dist) / max(1.0, radius)
-                    elif dist < radius * 3.0:
-                        score += 0.25 * (1.0 - (dist - radius) / max(1.0, radius * 2.0))
-            risks[idx] = min(1.0, score / max(1.0, len(self.direction_risk_horizons)))
+                    clearance = dist - radius
+                    if clearance <= 0.0:
+                        danger = min(1.0, 0.82 + (-clearance / max(1.0, radius)) * 0.18)
+                    else:
+                        danger = math.exp(-clearance / self.direction_risk_falloff)
+                    current_dist = math.hypot(bx - x, by - y)
+                    distance_weight = 0.35 + 0.65 * math.exp(-max(0.0, current_dist - radius) / 260.0)
+                    horizon_risk = max(horizon_risk, danger * distance_weight)
+                weighted_risk += horizon_risk * horizon_weight
+                total_weight += horizon_weight
+            risks[idx] = min(1.0, weighted_risk / max(1e-6, total_weight))
         return risks
 
     def _closest_enemy_features(self, enemy_list, x, y, wall_x, wall_y):
