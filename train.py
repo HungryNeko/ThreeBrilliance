@@ -467,17 +467,7 @@ class Train:
         return boss_hp / boss_max_hp if boss_max_hp else 0.0
 
     def _death_penalty(self):
-        return -18000.0 - 12000.0 * self._boss_hp_pct()
-
-    def _apply_action_risk_reward(self, agent, reward, hurt):
-        risk_reward = agent.action_risk_reward(self._last_processed_state, self._last_action, hurt)
-        if risk_reward == 0.0:
-            return reward
-        components = getattr(agent, "last_reward_components", None)
-        if isinstance(components, dict):
-            components["risk_choice"] = risk_reward
-            components["total"] = components.get("total", reward) + risk_reward
-        return reward + risk_reward
+        return -35000.0 - 25000.0 * self._boss_hp_pct()
 
     def _update_player_homing_targets(self):
         targets = [enemy for enemy in self.enemy_list if getattr(enemy, "show", True)]
@@ -577,7 +567,6 @@ class Train:
             self.WINDOW_WIDTH,
             self.WINDOW_HEIGHT,
         )
-        reward = self._apply_action_risk_reward(agent, reward, self.last_time_hurt)
         reward += penalty
         components = getattr(agent, "last_reward_components", None)
         if isinstance(components, dict):
@@ -644,7 +633,6 @@ class Train:
                     self.WINDOW_WIDTH,
                     self.WINDOW_HEIGHT
                 )
-                reward = self._apply_action_risk_reward(agent, reward, self.last_time_hurt)
                 enemies_alive_for_reward = len(self.enemy_list) > 0
                 if self._had_enemies_for_reward and not enemies_alive_for_reward:
                     reward += 100  # 消灭所有敌人奖励
@@ -954,13 +942,6 @@ class Train:
         overlay = pygame.Surface((self.WINDOW_WIDTH, self.WINDOW_HEIGHT), pygame.SRCALPHA)
         x = self.player1.position_x
         y = self.player1.position_y
-        action_delta = [
-            (-1, -1), (0, -1), (1, -1),
-            (1, 0), (1, 1), (0, 1),
-            (-1, 1), (-1, 0),
-        ]
-        decision = getattr(agent, "last_decision", {})
-        action = decision.get("action")
 
         inner_rect = pygame.Rect(
             agent.wall_repulse_dist,
@@ -979,23 +960,26 @@ class Train:
         pygame.draw.line(overlay, (255, 220, 80, 160), (x, y), right_end, 2)
         pygame.draw.line(overlay, (255, 245, 180, 140), (x, y), center_end, 1)
 
-        for idx, (dx, dy) in enumerate(action_delta):
-            norm = math.hypot(dx, dy)
-            end_x = x + dx / norm * agent.max_lookahead
-            end_y = y + dy / norm * agent.max_lookahead
-            pygame.draw.line(overlay, (80, 180, 255, 60), (x, y), (end_x, end_y), 1)
-
-        for idx, (dx, dy) in enumerate(action_delta):
-            norm = math.hypot(dx, dy)
-            cx = x + dx / norm * 44
-            cy = y + dy / norm * 44
-            risk = float(state[idx]) if state and idx < len(state) else 0.0
-            color = (255, 80, 80, 220) if risk > 0.6 else (255, 210, 80, 180) if risk > 0.25 else (0, 255, 120, 150)
-            if idx == action:
-                color = (80, 180, 255, 230)
-            pygame.draw.circle(overlay, color, (int(cx), int(cy)), 14, 1)
-            label = self.debug_font_small.render(f"{risk:.1f}", True, color[:3])
-            overlay.blit(label, (int(cx + 10), int(cy - 8)))
+        local_radius = int(agent.local_world_radius)
+        local_rect = pygame.Rect(
+            int(x - local_radius),
+            int(y - local_radius),
+            local_radius * 2,
+            local_radius * 2,
+        ).clip(pygame.Rect(0, 0, self.WINDOW_WIDTH, self.WINDOW_HEIGHT))
+        pygame.draw.rect(overlay, (80, 220, 255, 42), local_rect, 0)
+        pygame.draw.rect(overlay, (80, 220, 255, 210), local_rect, 2)
+        for ratio, alpha in ((0.25, 150), (0.5, 110), (0.75, 80), (1.0, 60)):
+            r = int(local_radius * ratio)
+            pygame.draw.circle(overlay, (80, 220, 255, alpha), (int(x), int(y)), r, 1)
+        pygame.draw.line(overlay, (80, 220, 255, 120), (int(x - local_radius), int(y)), (int(x + local_radius), int(y)), 1)
+        pygame.draw.line(overlay, (80, 220, 255, 120), (int(x), int(y - local_radius)), (int(x), int(y + local_radius)), 1)
+        label = self.debug_font_small.render(
+            f"local CNN lens {agent.local_grid_size}x{agent.local_grid_size}, radius {local_radius}px",
+            True,
+            (120, 235, 255),
+        )
+        overlay.blit(label, (max(4, int(local_rect.left)), max(4, int(local_rect.top) - 18)))
 
         pygame.draw.circle(overlay, (0, 140, 255, 220), (int(x), int(y)), 4)
         self.window.blit(overlay, (0, 0))
@@ -1008,18 +992,16 @@ class Train:
         action_priors = decision.get("action_priors", tuple(0.0 for _ in range(agent.action_size)))
         action = decision.get("action", self.action)
         action_label = decision.get("action_label", str(action))
-        direction_risks = tuple(float(v) for v in state[:8]) if state else tuple(0.0 for _ in range(8))
-        aim_features = tuple(state[14:19]) if state and len(state) >= 19 else (0, 0, 0, 0.0, 1.0)
+        aim_features = tuple(state[6:11]) if state and len(state) >= 11 else (0, 0, 0, 0.0, 1.0)
         reward = getattr(agent, "last_reward_components", {})
 
         lines = [
             f"RL policy: {decision.get('policy_mode', 'pure-q')} | hard rules: {'ON' if agent.use_hard_rules else 'OFF'}",
             f"Candidates: {list(candidates)} | action: {action} {action_label} | eps: {agent.epsilon:.3f}",
-            f"Move risk: 8 dirs, horizons {agent.direction_risk_horizons}, wall band {agent.wall_repulse_dist}px",
+            f"Local CNN lens: {agent.local_grid_size}x{agent.local_grid_size}, radius {agent.local_world_radius}px | wall band {agent.wall_repulse_dist}px",
             f"Shot cone: +/-{agent.shot_cone_angle_degrees}deg, range {agent.shot_range}px | L/C/R enemies: {int(aim_features[0])}/{int(aim_features[1])}/{int(aim_features[2])}",
             f"Aim align: {float(aim_features[3]):.2f} | nearest in cone: {float(aim_features[4]):.2f} range",
-            "Input dims: move_risk[0:8], player x/y, enemy rel x/y, wall w/h, aim[14:18]",
-            "Risk: " + ", ".join(f"{v:.2f}" for v in direction_risks),
+            "Input dims: player x/y, enemy rel x/y, enemy/bullet counts, hit/hurt, aim, wall distance",
             "Q: " + ", ".join(f"{i}:{q_values[i]:.1f}" for i in range(agent.action_size)),
             "Prior: " + ", ".join(f"{i}:{action_priors[i]:.1f}" for i in range(agent.action_size)),
             "Q+prior: " + ", ".join(f"{i}:{adjusted_values[i]:.1f}" for i in range(agent.action_size)),
