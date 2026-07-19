@@ -9,6 +9,8 @@ import move_funcs
 
 
 class NullSound:
+    is_null_sound = True
+
     def set_volume(self, volume):
         pass
 
@@ -16,6 +18,22 @@ class NullSound:
 class NullChannel:
     def play(self, sound):
         pass
+
+    def get_busy(self):
+        return False
+
+
+class SafeChannel:
+    def __init__(self, channel):
+        self.channel = channel
+
+    def play(self, sound, *args, **kwargs):
+        if getattr(sound, "is_null_sound", False):
+            return None
+        return self.channel.play(sound, *args, **kwargs)
+
+    def get_busy(self):
+        return self.channel.get_busy()
 
 
 def safe_sound(path, volume=0.0):
@@ -29,7 +47,7 @@ def safe_sound(path, volume=0.0):
 
 def safe_channel(index):
     try:
-        return pygame.mixer.Channel(index)
+        return SafeChannel(pygame.mixer.Channel(index))
     except pygame.error:
         return NullChannel()
 

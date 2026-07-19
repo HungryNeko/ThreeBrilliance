@@ -25,7 +25,8 @@ class Train:
             render_every=5,
             log_every=1000,
             checkpoint="current_best_dqn.pth",
-            log_file="training_log.jsonl"):
+            log_file="training_log.jsonl",
+            load_training_state=True):
         self.boss_exist = False
         self.last_time_hit=0
         self.rand=0
@@ -77,8 +78,20 @@ class Train:
         self.stage=0
         self.stage_kill=0
         self.stage_kill_boss=0
+        self.best_stage = 0
+        self.best_stage_kill = 0
+        self.best_stage_kill_boss = 0
+        self.best_avg_reward = float("-inf")
+        self.episode = 0
+        self.death_resets = 0
+        self.boss_stall_resets = 0
+        self.last_terminal_reason = ""
+        self.boss_low_hp_no_hit_frames = 0
+        self.boss_stall_hp_pct = 0.15
+        self.boss_stall_no_hit_limit = 1200
         self.start_time = time.time()
         self.total_reward = 0.0
+        self.reward_steps = 0
         self.last_reward = 0.0
         self.window_reward = 0.0
         self.total_hit_power = 0.0
@@ -96,6 +109,9 @@ class Train:
         self.total_boss_time_penalty = 0.0
         self.log_file_path = log_file
         self.log_file = open(log_file, "a", buffering=1) if log_file else None
+        self.training_state_path = f"{checkpoint}.train_state.json" if checkpoint else None
+        if load_training_state:
+            self._load_training_state()
 
         # 资源加载
         self.spritesheet = img.load_character_spritesheet("src/img_1.png", 4, 3, 50, 50) if self.visual else []
@@ -299,26 +315,35 @@ class Train:
         sps = (self.count - self.last_log_count) / window_elapsed
         accuracy = self.total_hit_power / max(1.0, self.total_shot_power)
         window_accuracy = self.window_hit_power / max(1.0, self.window_shot_power)
-        boss_hp = 0.0
-        boss_max_hp = 0.0
-        for enemy in self.enemy_list:
-            if getattr(enemy, "boss", False) and getattr(enemy, "show", True):
-                boss_hp += max(0.0, getattr(enemy, "health", 0.0))
-                boss_max_hp += max(1.0, getattr(enemy, "full_health", 1.0))
-        boss_pct = boss_hp / boss_max_hp if boss_max_hp else 0.0
+        boss_pct = self._boss_hp_pct()
         decision = getattr(agent, "last_decision", {})
         loss = decision.get("loss")
-        avg_reward = self.total_reward / max(1, self.count)
+        avg_reward = self.total_reward / max(1, self.reward_steps)
+        if (self.stage, self.stage_kill, self.stage_kill_boss) > (
+            self.best_stage,
+            self.best_stage_kill,
+            self.best_stage_kill_boss,
+        ):
+            self.best_stage = self.stage
+            self.best_stage_kill = self.stage_kill
+            self.best_stage_kill_boss = self.stage_kill_boss
+        self.best_avg_reward = max(self.best_avg_reward, avg_reward)
         progress = f"{self.stage}.{self.stage_kill}/{self.stage_kill_boss}"
+        best_progress = f"{self.best_stage}.{self.best_stage_kill}/{self.best_stage_kill_boss}"
         return {
             "step": self.count,
             "elapsed_sec": elapsed,
             "sps": sps,
             "device": str(decision.get("device", getattr(agent, "device", "unknown"))),
             "progress": progress,
+            "best_progress": best_progress,
             "stage": self.stage,
             "stage_kill": self.stage_kill,
             "stage_boss_kill": self.stage_kill_boss,
+            "episode": self.episode,
+            "death_resets": self.death_resets,
+            "boss_stall_resets": self.boss_stall_resets,
+            "last_terminal_reason": self.last_terminal_reason,
             "player_hp": self.player1.health,
             "player_full_hp": self.player1.full_health,
             "boss_hp_pct": boss_pct,
@@ -332,6 +357,7 @@ class Train:
             "window_shot_power": self.window_shot_power,
             "reward": self.last_reward,
             "avg_reward": avg_reward,
+            "best_avg_reward": self.best_avg_reward,
             "window_reward": self.window_reward,
             "epsilon": getattr(agent, "epsilon", 0.0),
             "loss": loss,
@@ -340,6 +366,7 @@ class Train:
             "action": decision.get("action", self.action),
             "action_label": decision.get("action_label", ""),
             "boss_alive_frames": self.boss_alive_frames,
+            "boss_low_hp_no_hit_frames": self.boss_low_hp_no_hit_frames,
             "boss_time_penalty": self.last_boss_time_penalty,
             "total_boss_time_penalty": self.total_boss_time_penalty,
         }
@@ -348,6 +375,41 @@ class Train:
         if self.log_file is None:
             return
         self.log_file.write(json.dumps(metrics, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def _save_training_state(self):
+        if not self.training_state_path:
+            return
+        state = {
+            "total_reward": self.total_reward,
+            "reward_steps": self.reward_steps,
+            "best_stage": self.best_stage,
+            "best_stage_kill": self.best_stage_kill,
+            "best_stage_kill_boss": self.best_stage_kill_boss,
+            "best_avg_reward": self.best_avg_reward,
+            "episode": self.episode,
+            "death_resets": self.death_resets,
+            "boss_stall_resets": self.boss_stall_resets,
+        }
+        with open(self.training_state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"))
+
+    def _load_training_state(self):
+        if not self.training_state_path or not os.path.exists(self.training_state_path):
+            return
+        try:
+            with open(self.training_state_path, "r", encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return
+        self.total_reward = float(state.get("total_reward", self.total_reward))
+        self.reward_steps = int(state.get("reward_steps", self.reward_steps))
+        self.best_stage = int(state.get("best_stage", self.best_stage))
+        self.best_stage_kill = int(state.get("best_stage_kill", self.best_stage_kill))
+        self.best_stage_kill_boss = int(state.get("best_stage_kill_boss", self.best_stage_kill_boss))
+        self.best_avg_reward = float(state.get("best_avg_reward", self.best_avg_reward))
+        self.episode = int(state.get("episode", self.episode))
+        self.death_resets = int(state.get("death_resets", self.death_resets))
+        self.boss_stall_resets = int(state.get("boss_stall_resets", self.boss_stall_resets))
 
     def _reset_log_window(self):
         self.window_reward = 0.0
@@ -371,31 +433,120 @@ class Train:
         self.total_boss_time_penalty += penalty
         return penalty
 
+    def _boss_hp_pct(self):
+        boss_hp = 0.0
+        boss_max_hp = 0.0
+        for enemy in self.enemy_list:
+            if getattr(enemy, "boss", False) and getattr(enemy, "show", True):
+                boss_hp += max(0.0, getattr(enemy, "health", 0.0))
+                boss_max_hp += max(1.0, getattr(enemy, "full_health", 1.0))
+        return boss_hp / boss_max_hp if boss_max_hp else 0.0
+
+    def _update_boss_stall_counter(self):
+        boss_pct = self._boss_hp_pct()
+        boss_alive = boss_pct > 0.0
+        if not boss_alive or boss_pct > self.boss_stall_hp_pct:
+            self.boss_low_hp_no_hit_frames = 0
+            return False
+        if self.last_time_hit > 0:
+            self.boss_low_hp_no_hit_frames = 0
+            return False
+        self.boss_low_hp_no_hit_frames += 1
+        return self.boss_low_hp_no_hit_frames >= self.boss_stall_no_hit_limit
+
+    def _enemy_type_for_stage(self, stage):
+        return {
+            0: 0,
+            1: 1,
+            2: 3,
+            3: 4,
+            4: 5,
+        }.get(stage, 0)
+
+    def _reset_episode(self, reason):
+        reset_stage = self.stage
+        self.episode += 1
+        if reason == "death":
+            self.death_resets += 1
+        elif reason == "boss_stall":
+            self.boss_stall_resets += 1
+        self.last_terminal_reason = reason
+        self.player1 = character.player(
+            self.WINDOW_WIDTH // 2,
+            self.WINDOW_HEIGHT // 2,
+            10,
+            5,
+            True,
+            [0, 0, self.WINDOW_WIDTH, self.WINDOW_HEIGHT - 5],
+            100,
+            (20, 255, 255),
+        )
+        self.player1.level = 4
+        self.enemy_list = []
+        self.stage = reset_stage
+        self.stage_kill = 0
+        self.stage_kill_boss = 0
+        self.enemy_type = self._enemy_type_for_stage(self.stage)
+        self.boss_exist = False
+        self.lastbosstime = 0
+        self.boss_alive_frames = 0
+        self.last_boss_time_penalty = 0.0
+        self.boss_low_hp_no_hit_frames = 0
+        self._had_enemies_for_reward = False
+        self._last_processed_state = None
+        self._last_action = None
+        self.action = 8
+        self.last_time_hit = 0
+        self.last_time_hurt = 0
+
+    def _learn_terminal_transition(self, agent, reason, penalty):
+        if self._last_processed_state is None or self._last_action is None:
+            return
+        terminal_state, reward = agent._process_game_state(
+            self.enemy_list,
+            [self.player1.position_x, self.player1.position_y],
+            self.last_time_hit,
+            self.last_time_hurt,
+            self.WINDOW_WIDTH,
+            self.WINDOW_HEIGHT,
+        )
+        reward += penalty
+        self.last_reward = reward
+        self.total_reward += reward
+        self.reward_steps += 1
+        self.window_reward += reward
+        agent.learn(reward, terminal_state, self._last_action, done=True)
+        agent.last_state = None
+        agent.last_action = None
+
+    def _handle_terminal_state(self, agent):
+        if self.player1.health <= 0:
+            self._learn_terminal_transition(agent, "death", -5000.0)
+            self._reset_episode("death")
+            return True
+        if self._update_boss_stall_counter():
+            self._learn_terminal_transition(agent, "boss_stall", -3000.0)
+            self._reset_episode("boss_stall")
+            return True
+        return False
+
     def _print_text_status(self, agent):
         metrics = self._collect_metrics(agent)
-        loss = metrics["loss"]
-        loss_text = "nan" if loss is None else f"{loss:.4f}"
         status = " | ".join(
             [
                 f"step={metrics['step']}",
-                f"sps={metrics['sps']:.1f}",
-                f"device={metrics['device']}",
-                f"progress={metrics['progress']}",
-                f"hp={metrics['player_hp']:.0f}/{metrics['player_full_hp']}",
-                f"boss_hp={metrics['boss_hp_pct']:.1%}",
-                f"acc={metrics['window_accuracy']:.3f}",
-                f"hurt={metrics['window_hurt_power']:.0f}",
-                f"r={metrics['window_reward']:.1f}",
-                f"boss_t={metrics['boss_alive_frames']}",
-                f"boss_pen={metrics['boss_time_penalty']:.1f}",
-                f"eps={metrics['epsilon']:.2f}",
-                f"loss={loss_text}",
+                f"prog={metrics['progress']}",
+                f"best={metrics['best_progress']}",
+                f"avg={metrics['avg_reward']:.1f}",
+                f"best_avg={metrics['best_avg_reward']:.1f}",
+                f"reset={metrics['death_resets']}/{metrics['boss_stall_resets']}",
             ]
         )
         padding = max(0, self._last_status_width - len(status))
         print("\r" + status + (" " * padding), end="", flush=True)
         self._last_status_width = len(status)
         self._write_log_record(metrics)
+        self._save_training_state()
         self._reset_log_window()
         self.last_log_count = self.count
         self.last_log_time = time.time()
@@ -407,6 +558,7 @@ class Train:
             if self.learncount==1:
                 #self.learntimes+=1
                 agent.save(self.checkpoint)  # 保存模型状态
+                self._save_training_state()
             # 1. 如果存在上一次的状态和动作，先进行学习
             if self._last_processed_state is not None and self._last_action is not None:
                 # 获取当前状态
@@ -425,6 +577,7 @@ class Train:
                 reward += self._update_boss_time_penalty()
                 self.last_reward = reward
                 self.total_reward += reward
+                self.reward_steps += 1
                 self.window_reward += reward
 
                 # 进行Q-learning更新
@@ -468,8 +621,9 @@ class Train:
             self.count += 1
             if self.count == sys.maxsize:
                 self.count = 0
-            for event in pygame.event.get():
-                self._handle_event(event)
+            if self.visual:
+                for event in pygame.event.get():
+                    self._handle_event(event)
             shift = 1
 
             bullet_count_before_shoot = len(self.player1.bullets)
@@ -569,7 +723,10 @@ class Train:
                 if should_render:
                     pygame.draw.circle(self.window, i.color, (i.position_x, i.position_y), i.size)
                 for e in self.enemy_list:
-                    if math.sqrt((i.position_x - e.position_x) ** 2 + (e.position_y - i.position_y) ** 2) < e.size + i.size and e.show:
+                    hit_radius = e.size + i.size
+                    dx = i.position_x - e.position_x
+                    dy = e.position_y - i.position_y
+                    if dx * dx + dy * dy < hit_radius * hit_radius and e.show:
                         e.change_health(-i.power)
                         if e.health<=0:
                             self.stage_kill += 1
@@ -601,7 +758,11 @@ class Train:
                         for b in e.bullets:
                             b.record[2]*=0.9999
                     for b in e.bullets:
-                        if math.sqrt((b.position_x - self.player1.position_x) ** 2 + (b.position_y - self.player1.position_y) ** 2) < b.size + self.player1.size and self.player1.show:
+                        hit_radius = b.size + self.player1.size
+                        dx = b.position_x - self.player1.position_x
+                        dy = b.position_y - self.player1.position_y
+                        dist_sq = dx * dx + dy * dy
+                        if dist_sq < hit_radius * hit_radius and self.player1.show:
 
                             self.player1.change_health(-b.power)
                             self.last_time_hurt += b.power
@@ -609,7 +770,7 @@ class Train:
                             self.window_hurt_power += b.power
 
                             b.show = False
-                        elif b.size + self.player1.size + 5 > math.sqrt((b.position_x - self.player1.position_x) ** 2 + (b.position_y - self.player1.position_y) ** 2) > b.size + self.player1.size and self.player1.show:
+                        elif hit_radius * hit_radius < dist_sq < (hit_radius + 5) * (hit_radius + 5) and self.player1.show:
                             if self.visual and self.audio_enabled:
                                 self.channel_close.play(self.close_sound)
                         if b.show and should_render:
@@ -618,13 +779,15 @@ class Train:
                         remove_en.append(i)
                 for i in sorted(remove_en, reverse=True):
                     del self.enemy_list[i]
+            self._handle_terminal_state(agent)
             if shift != 1 and should_render:
                 pygame.draw.circle(self.window, self.player1.color, (self.player1.position_x, self.player1.position_y), self.player1.size)
             #self.draw_agent_zones(self.window, agent, (self.player1.position_x, self.player1.position_y))
             if should_render:
                 self.show_heath(self.player1, True)
                 self.draw_rl_input_overlay(agent)
-            self.clock.tick(self.frame_cap)
+            if self.visual:
+                self.clock.tick(self.frame_cap)
             self.countfps+=1
             #print(agent.bullet_count)
             if self.countfps % 100 == 0:
@@ -805,9 +968,17 @@ if __name__ == "__main__":
     parser.add_argument("--render-every", type=int, default=5, help="Visible mode only: draw every N logic frames.")
     parser.add_argument("--log-every", type=int, default=1000, help="Print training status every N logic frames.")
     parser.add_argument("--log-file", default="training_log.jsonl", help="Append JSONL training metrics here. Empty disables file logging.")
+    parser.add_argument("--batch-size", type=int, default=64, help="Replay batch size for each gradient update.")
+    parser.add_argument("--train-every", type=int, default=4, help="Run gradient updates every N agent steps.")
+    parser.add_argument("--gradient-steps", type=int, default=1, help="Gradient updates to run at each training point.")
     args = parser.parse_args()
 
-    agent = STGAgent(device=args.device)
+    agent = STGAgent(
+        device=args.device,
+        batch_size=args.batch_size,
+        train_every=args.train_every,
+        gradient_steps=args.gradient_steps,
+    )
 
     if not args.no_load:
         try:
@@ -826,5 +997,6 @@ if __name__ == "__main__":
         log_every=args.log_every,
         checkpoint=args.checkpoint,
         log_file=args.log_file or None,
+        load_training_state=not args.no_load,
     )
     game.run()

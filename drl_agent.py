@@ -80,7 +80,7 @@ class ConvDQN(nn.Module):
 
 
 class DRLAgent:
-    def __init__(self, device="auto"):
+    def __init__(self, device="auto", batch_size=64, train_every=4, gradient_steps=1):
         self.action_size = 9
         self.wall_x = 600
         self.wall_y = 900
@@ -99,15 +99,17 @@ class DRLAgent:
         self.grid_height = 90
         self.grid_channels = 8
         self.vector_size = 14
+        self._grid_cache = {}
         self.device = self._select_device(device)
 
         self.gamma = 0.99
         self.epsilon = 0.20
         self.epsilon_min = 0.03
         self.epsilon_decay = 0.9995
-        self.batch_size = 64
+        self.batch_size = batch_size
         self.learning_rate = 1e-4
-        self.train_every = 4
+        self.train_every = train_every
+        self.gradient_steps = gradient_steps
         self.target_update_every = 1000
         self.replay = ReplayBuffer(100_000)
         self.steps = 0
@@ -172,6 +174,9 @@ class DRLAgent:
             "replay_size": len(self.replay),
             "updates": self.updates,
             "loss": self.loss_ema,
+            "batch_size": self.batch_size,
+            "train_every": self.train_every,
+            "gradient_steps": self.gradient_steps,
         }
         self.last_state = full_state
         self.last_action = action
@@ -186,34 +191,35 @@ class DRLAgent:
         if len(self.replay) < self.batch_size or self.steps % self.train_every != 0:
             return
 
-        states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
-        grid = self._batch_grids(states)
-        vector = self._batch_vectors(states)
-        next_grid = self._batch_grids(next_states)
-        next_vector = self._batch_vectors(next_states)
-        action_tensor = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
-        reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
-        done_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
+        for _ in range(self.gradient_steps):
+            states, actions, rewards, next_states, dones = self.replay.sample(self.batch_size)
+            grid = self._batch_grids(states)
+            vector = self._batch_vectors(states)
+            next_grid = self._batch_grids(next_states)
+            next_vector = self._batch_vectors(next_states)
+            action_tensor = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
+            reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
+            done_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
 
-        q = self.policy_net(grid, vector).gather(1, action_tensor)
-        with torch.no_grad():
-            next_actions = self.policy_net(next_grid, next_vector).argmax(dim=1, keepdim=True)
-            next_q = self.target_net(next_grid, next_vector).gather(1, next_actions)
-            target = reward_tensor + (1.0 - done_tensor) * self.gamma * next_q
+            q = self.policy_net(grid, vector).gather(1, action_tensor)
+            with torch.no_grad():
+                next_actions = self.policy_net(next_grid, next_vector).argmax(dim=1, keepdim=True)
+                next_q = self.target_net(next_grid, next_vector).gather(1, next_actions)
+                target = reward_tensor + (1.0 - done_tensor) * self.gamma * next_q
 
-        loss = F.smooth_l1_loss(q, target)
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10.0)
-        self.optimizer.step()
+            loss = F.smooth_l1_loss(q, target)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10.0)
+            self.optimizer.step()
 
-        loss_value = float(loss.detach().cpu())
-        self.loss_ema = loss_value if self.loss_ema is None else self.loss_ema * 0.98 + loss_value * 0.02
-        self.updates += 1
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        if self.updates % self.target_update_every == 0:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
+            loss_value = float(loss.detach().cpu())
+            self.loss_ema = loss_value if self.loss_ema is None else self.loss_ema * 0.98 + loss_value * 0.02
+            self.updates += 1
+            if self.epsilon > self.epsilon_min:
+                self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+            if self.updates % self.target_update_every == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def _predict_q(self, state):
         with torch.no_grad():
@@ -359,9 +365,7 @@ class DRLAgent:
 
     def _encode_shot_cone_channel(self, channel, x, y, wall_x, wall_y):
         cone = math.radians(self.shot_cone_angle_degrees)
-        xs = (np.arange(self.grid_width, dtype=np.float32) + 0.5) * wall_x / self.grid_width
-        ys = (np.arange(self.grid_height, dtype=np.float32) + 0.5) * wall_y / self.grid_height
-        xx, yy = np.meshgrid(xs, ys)
+        xx, yy, _ = self._get_grid_cache(wall_x, wall_y)
         dx = xx - x
         dy_up = y - yy
         dist = np.sqrt(dx * dx + dy_up * dy_up)
@@ -370,13 +374,28 @@ class DRLAgent:
         channel[mask] = 1.0 - np.minimum(1.0, angle[mask] / cone) * 0.5
 
     def _encode_wall_channel(self, channel):
-        yy, xx = np.indices(channel.shape)
-        left = xx
-        right = self.grid_width - 1 - xx
-        top = yy
-        bottom = self.grid_height - 1 - yy
+        _, _, wall_channel = self._get_grid_cache(self.wall_x, self.wall_y)
+        channel[:] = wall_channel
+
+    def _get_grid_cache(self, wall_x, wall_y):
+        key = (self.grid_width, self.grid_height, wall_x, wall_y)
+        cached = self._grid_cache.get(key)
+        if cached is not None:
+            return cached
+
+        xs = (np.arange(self.grid_width, dtype=np.float32) + 0.5) * wall_x / self.grid_width
+        ys = (np.arange(self.grid_height, dtype=np.float32) + 0.5) * wall_y / self.grid_height
+        xx, yy = np.meshgrid(xs, ys)
+        index_y, index_x = np.indices((self.grid_height, self.grid_width))
+        left = index_x
+        right = self.grid_width - 1 - index_x
+        top = index_y
+        bottom = self.grid_height - 1 - index_y
         dist = np.minimum(np.minimum(left, right), np.minimum(top, bottom)).astype(np.float32)
-        channel[:] = 1.0 - np.minimum(1.0, dist / 10.0)
+        wall_channel = 1.0 - np.minimum(1.0, dist / 10.0)
+        cached = (xx, yy, wall_channel)
+        self._grid_cache[key] = cached
+        return cached
 
     def _get_local_bullet_counts(self, enemy_list, x, y):
         d = self.direction_range
@@ -394,7 +413,10 @@ class DRLAgent:
                 bx, by = bullet.position_x, bullet.position_y
                 bsize = getattr(bullet, "size", 0)
                 for i, (zone_x, zone_y) in enumerate(directions):
-                    if math.hypot(bx - zone_x, by - zone_y) <= d + bsize:
+                    radius = d + bsize
+                    dx = bx - zone_x
+                    dy = by - zone_y
+                    if dx * dx + dy * dy <= radius * radius:
                         counts[i] += 1
         return counts
 
