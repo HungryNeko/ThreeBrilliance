@@ -99,6 +99,8 @@ class ConvDQN(nn.Module):
 
 
 class DRLAgent:
+    _stamp_offset_cache = {}
+
     def __init__(self, device="auto", batch_size=64, train_every=4, gradient_steps=1):
         self.action_size = 9
         self.wall_x = 600
@@ -121,10 +123,11 @@ class DRLAgent:
         self.safety_penalty_scale = 6000.0
         self.use_attack_prior = True
         self.attack_prior_scale = 900.0
-        self.boss_attack_prior_scale = 1800.0
+        self.boss_attack_prior_scale = 2600.0
         self.attack_vertical_min = 40.0
         self.attack_under_distance = 260.0
         self.attack_under_band = 180.0
+        self.boss_position_reward_scale = 120.0
 
         self.grid_width = 60
         self.grid_height = 90
@@ -134,7 +137,12 @@ class DRLAgent:
         self.local_world_radius = 260
         self.vector_size = 14
         self._grid_cache = {}
+        self._local_wall_lens_cache = {}
         self.device = self._select_device(device)
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
 
         self.gamma = 0.99
         self.epsilon = 0.20
@@ -386,11 +394,11 @@ class DRLAgent:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def _predict_q(self, state):
-        with torch.no_grad():
+        with torch.inference_mode():
             grid = self._batch_grids([state])
             local_grid = self._batch_local_grids([state])
             vector = self._batch_vectors([state])
-            return self.policy_net(grid, local_grid, vector).squeeze(0).detach().cpu().numpy()
+            return self.policy_net(grid, local_grid, vector).squeeze(0).cpu().numpy()
 
     def _batch_grids(self, states):
         arr = np.stack([s.grid for s in states]).astype(np.float32)
@@ -437,12 +445,14 @@ class DRLAgent:
         aim_left, aim_center, aim_right, aim_alignment, aim_dist = aim_features
         base_reward = hit * 100.0 + hurt * -150.0
         aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.3 + aim_alignment * 1.0) * 0.4
+        boss_position_reward = self._get_boss_position_reward(x, y, enemy_list)
         wall_reward = -wall_penalty * (1.0 if enemies_alive else 3.0)
-        reward = (base_reward + aim_reward + wall_reward) * wall_reward_coef
+        reward = (base_reward + aim_reward + boss_position_reward + wall_reward) * wall_reward_coef
         self.last_reward_components = {
             "hit": hit * 100.0,
             "hurt": hurt * -150.0,
             "aim": aim_reward,
+            "boss_position": boss_position_reward,
             "wall": wall_reward,
             "wall_coef": wall_reward_coef,
             "total": reward,
@@ -578,31 +588,49 @@ class DRLAgent:
         return int(mapped_x), int(mapped_y), local_radius
 
     def _encode_local_wall_channel(self, channel, x, y, wall_x, wall_y):
+        rel_x, rel_y = self._get_local_wall_lens_cache()
+        wx = x + rel_x
+        wy = y + rel_y
+        dist_x = np.minimum(wx, wall_x - wx)
+        dist_y = np.minimum(wy, wall_y - wy)
+        dist = np.minimum(dist_x, dist_y)
+        channel[:] = 1.0 - np.minimum(1.0, np.maximum(0.0, dist) / 80.0)
+
+    def _get_local_wall_lens_cache(self):
+        key = (self.local_grid_size, self.local_world_radius)
+        cached = self._local_wall_lens_cache.get(key)
+        if cached is not None:
+            return cached
         center = self.local_grid_size // 2
-        radius = float(self.local_world_radius)
-        for gy in range(self.local_grid_size):
-            for gx in range(self.local_grid_size):
-                nx = (gx - center) / max(1, center)
-                ny = (gy - center) / max(1, center)
-                rel_x = math.copysign(nx * nx * radius, nx)
-                rel_y = math.copysign(ny * ny * radius, ny)
-                wx = x + rel_x
-                wy = y + rel_y
-                dist = min(wx, wall_x - wx, wy, wall_y - wy)
-                channel[gy, gx] = 1.0 - min(1.0, max(0.0, dist) / 80.0)
+        coords = (np.arange(self.local_grid_size, dtype=np.float32) - center) / max(1, center)
+        rel = np.sign(coords) * coords * coords * float(self.local_world_radius)
+        rel_x = rel[None, :]
+        rel_y = rel[:, None]
+        cached = (rel_x, rel_y)
+        self._local_wall_lens_cache[key] = cached
+        return cached
 
     @staticmethod
     def _stamp(channel, gx, gy, radius, value):
         height, width = channel.shape
-        x0, x1 = max(0, gx - radius), min(width - 1, gx + radius)
-        y0, y1 = max(0, gy - radius), min(height - 1, gy + radius)
-        for yy in range(y0, y1 + 1):
-            for xx in range(x0, x1 + 1):
-                if (xx - gx) ** 2 + (yy - gy) ** 2 <= radius ** 2:
-                    if value >= 0:
-                        channel[yy, xx] = max(channel[yy, xx], value)
-                    else:
-                        channel[yy, xx] = min(channel[yy, xx], value)
+        offsets = DRLAgent._stamp_offset_cache.get(radius)
+        if offsets is None:
+            radius_sq = radius * radius
+            offsets = [
+                (dy, dx)
+                for dy in range(-radius, radius + 1)
+                for dx in range(-radius, radius + 1)
+                if dx * dx + dy * dy <= radius_sq
+            ]
+            DRLAgent._stamp_offset_cache[radius] = offsets
+        for dy, dx in offsets:
+            yy = gy + dy
+            xx = gx + dx
+            if 0 <= yy < height and 0 <= xx < width:
+                if value >= 0:
+                    channel[yy, xx] = max(channel[yy, xx], value)
+                else:
+                    channel[yy, xx] = min(channel[yy, xx], value)
 
     def _encode_shot_cone_channel(self, channel, x, y, wall_x, wall_y):
         cone = math.radians(self.shot_cone_angle_degrees)
@@ -704,6 +732,49 @@ class DRLAgent:
             best_alignment = max(best_alignment, alignment)
             nearest_dist_norm = min(nearest_dist_norm, min(1.0, dist / self.shot_range))
         return left_count, center_count, right_count, best_alignment, nearest_dist_norm
+
+    def _get_boss_position_reward(self, x, y, enemy_list):
+        bosses = [
+            enemy
+            for enemy in enemy_list
+            if getattr(enemy, "boss", False) and getattr(enemy, "show", True)
+        ]
+        if not bosses:
+            return 0.0
+
+        boss = min(bosses, key=lambda enemy: abs(enemy.position_x - x) + abs(enemy.position_y - y))
+        dx = float(boss.position_x) - x
+        dy_up = y - float(boss.position_y)
+        if dy_up <= 0.0:
+            return -self.boss_position_reward_scale
+        if dy_up > self.shot_range:
+            return 0.0
+
+        boss_size = float(getattr(boss, "size", 0.0))
+        cone_width = max(
+            16.0,
+            dy_up * math.tan(math.radians(self.shot_cone_angle_degrees)) + boss_size,
+        )
+        center_width = max(
+            10.0,
+            dy_up * math.tan(math.radians(self.shot_center_angle_degrees)) + boss_size,
+        )
+        abs_dx = abs(dx)
+        cone_score = max(0.0, 1.0 - abs_dx / cone_width)
+        center_score = max(0.0, 1.0 - abs_dx / center_width)
+        under_error = abs(dy_up - self.attack_under_distance)
+        under_score = max(0.0, 1.0 - under_error / self.attack_under_band)
+
+        reward = self.boss_position_reward_scale * (
+            1.20 * center_score
+            + 0.65 * cone_score
+            + 0.45 * under_score
+        )
+        if abs_dx > cone_width:
+            reward -= self.boss_position_reward_scale * min(1.0, (abs_dx - cone_width) / 160.0)
+        if dy_up < self.attack_vertical_min:
+            reward -= self.boss_position_reward_scale * 0.8
+        return reward
 
     def _get_direction_threat(self, x, y, wall_x, wall_y, enemy_list):
         action_delta = [

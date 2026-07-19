@@ -86,9 +86,11 @@ class Train:
         self.death_resets = 0
         self.boss_stall_resets = 0
         self.last_terminal_reason = ""
+        self.boss_no_hit_frames = 0
         self.boss_low_hp_no_hit_frames = 0
-        self.boss_stall_hp_pct = 0.15
-        self.boss_stall_no_hit_limit = 1200
+        self.boss_stall_hp_pct = 0.35
+        self.boss_stall_no_hit_limit = 2400
+        self.boss_stall_low_hp_no_hit_limit = 1200
         self.start_time = time.time()
         self.total_reward = 0.0
         self.reward_steps = 0
@@ -366,6 +368,7 @@ class Train:
             "action": decision.get("action", self.action),
             "action_label": decision.get("action_label", ""),
             "boss_alive_frames": self.boss_alive_frames,
+            "boss_no_hit_frames": self.boss_no_hit_frames,
             "boss_low_hp_no_hit_frames": self.boss_low_hp_no_hit_frames,
             "boss_time_penalty": self.last_boss_time_penalty,
             "total_boss_time_penalty": self.total_boss_time_penalty,
@@ -445,14 +448,20 @@ class Train:
     def _update_boss_stall_counter(self):
         boss_pct = self._boss_hp_pct()
         boss_alive = boss_pct > 0.0
-        if not boss_alive or boss_pct > self.boss_stall_hp_pct:
+        if not boss_alive:
+            self.boss_no_hit_frames = 0
             self.boss_low_hp_no_hit_frames = 0
             return False
         if self.last_time_hit > 0:
+            self.boss_no_hit_frames = 0
             self.boss_low_hp_no_hit_frames = 0
             return False
+        self.boss_no_hit_frames += 1
+        if boss_pct > self.boss_stall_hp_pct:
+            self.boss_low_hp_no_hit_frames = 0
+            return self.boss_no_hit_frames >= self.boss_stall_no_hit_limit
         self.boss_low_hp_no_hit_frames += 1
-        return self.boss_low_hp_no_hit_frames >= self.boss_stall_no_hit_limit
+        return self.boss_low_hp_no_hit_frames >= self.boss_stall_low_hp_no_hit_limit
 
     def _enemy_type_for_stage(self, stage):
         return {
@@ -491,6 +500,7 @@ class Train:
         self.lastbosstime = 0
         self.boss_alive_frames = 0
         self.last_boss_time_penalty = 0.0
+        self.boss_no_hit_frames = 0
         self.boss_low_hp_no_hit_frames = 0
         self._had_enemies_for_reward = False
         self._last_processed_state = None
@@ -525,7 +535,7 @@ class Train:
             self._reset_episode("death")
             return True
         if self._update_boss_stall_counter():
-            self._learn_terminal_transition(agent, "boss_stall", -3000.0)
+            self._learn_terminal_transition(agent, "boss_stall", -6000.0)
             self._reset_episode("boss_stall")
             return True
         return False
@@ -560,6 +570,7 @@ class Train:
                 agent.save(self.checkpoint)  # 保存模型状态
                 self._save_training_state()
             # 1. 如果存在上一次的状态和动作，先进行学习
+            current_state = None
             if self._last_processed_state is not None and self._last_action is not None:
                 # 获取当前状态
                 current_state, reward = agent._process_game_state(
@@ -584,14 +595,17 @@ class Train:
                 agent.learn(reward, current_state, self._last_action)
 
             # 2. 处理当前状态并获取新动作
-            processed_state, current_reward = agent._process_game_state(
-                self.enemy_list,
-                [self.player1.position_x, self.player1.position_y],
-                self.last_time_hit,
-                self.last_time_hurt,
-                self.WINDOW_WIDTH,
-                self.WINDOW_HEIGHT
-            )
+            if current_state is None:
+                processed_state, current_reward = agent._process_game_state(
+                    self.enemy_list,
+                    [self.player1.position_x, self.player1.position_y],
+                    self.last_time_hit,
+                    self.last_time_hurt,
+                    self.WINDOW_WIDTH,
+                    self.WINDOW_HEIGHT
+                )
+            else:
+                processed_state = current_state
             #print(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
 
             # 3. 获取动作
