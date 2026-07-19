@@ -11,6 +11,7 @@ if "--headless" in sys.argv:
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 import pygame
+import torch
 from sympy.physics.units import action
 
 import character
@@ -26,7 +27,8 @@ class Train:
             log_every=1000,
             checkpoint="current_best_dqn.pth",
             log_file="training_log.jsonl",
-            load_training_state=True):
+            load_training_state=True,
+            training_enabled=None):
         self.boss_exist = False
         self.last_time_hit=0
         self.rand=0
@@ -45,6 +47,7 @@ class Train:
         self.WINDOW_WIDTH = 600
         self.WINDOW_HEIGHT = 900
         self.visual = not self.headless
+        self.training_enabled = self.headless if training_enabled is None else training_enabled
         if self.visual:
             self.ui_scale = self._initial_ui_scale()
             self.display_size = self._scaled_size(self.ui_scale)
@@ -72,6 +75,7 @@ class Train:
         self.enemy_list = []
         self.curtime= time.time()
         self.count = 0
+        self.log_step_offset = 0
         self.enemy_type = 0
         self.learncount=0
         self.learntimes=0
@@ -350,7 +354,8 @@ class Train:
         progress = f"{self.stage}.{self.stage_kill}/{self.stage_kill_boss}"
         best_progress = f"{self.best_stage}.{self.best_stage_kill}/{self.best_stage_kill_boss}"
         return {
-            "step": self.count,
+            "step": self.log_step_offset + self.count,
+            "session_step": self.count,
             "elapsed_sec": elapsed,
             "sps": sps,
             "device": str(decision.get("device", getattr(agent, "device", "unknown"))),
@@ -404,6 +409,7 @@ class Train:
         state = {
             "total_reward": self.total_reward,
             "reward_steps": self.reward_steps,
+            "log_step": self.log_step_offset + self.count,
             "best_stage": self.best_stage,
             "best_stage_kill": self.best_stage_kill,
             "best_stage_kill_boss": self.best_stage_kill_boss,
@@ -426,6 +432,7 @@ class Train:
             return
         self.total_reward = float(state.get("total_reward", self.total_reward))
         self.reward_steps = int(state.get("reward_steps", self.reward_steps))
+        self.log_step_offset = int(state.get("log_step", state.get("reward_steps", self.log_step_offset)))
         self.best_stage = int(state.get("best_stage", self.best_stage))
         self.best_stage_kill = int(state.get("best_stage_kill", self.best_stage_kill))
         self.best_stage_kill_boss = int(state.get("best_stage_kill_boss", self.best_stage_kill_boss))
@@ -557,6 +564,8 @@ class Train:
         self.last_time_boss_damage = 0
 
     def _learn_terminal_transition(self, agent, reason, penalty):
+        if not self.training_enabled:
+            return
         if self._last_processed_state is None or self._last_action is None:
             return
         terminal_state, reward = agent._process_game_state(
@@ -608,7 +617,8 @@ class Train:
         print("\r" + status + (" " * padding), end="", flush=True)
         self._last_status_width = len(status)
         self._write_log_record(metrics)
-        self._save_training_state()
+        if self.training_enabled:
+            self._save_training_state()
         self._reset_log_window()
         self.last_log_count = self.count
         self.last_log_time = time.time()
@@ -617,13 +627,13 @@ class Train:
         self.learncount+=1
         self.learncount%= 10000
         if self.learntimes%1==0:
-            if self.learncount==1:
+            if self.training_enabled and self.learncount==1:
                 #self.learntimes+=1
                 agent.save(self.checkpoint)  # 保存模型状态
                 self._save_training_state()
             # 1. 如果存在上一次的状态和动作，先进行学习
             current_state = None
-            if self._last_processed_state is not None and self._last_action is not None:
+            if self.training_enabled and self._last_processed_state is not None and self._last_action is not None:
                 # 获取当前状态
                 current_state, reward = agent._process_game_state(
                     self.enemy_list,
@@ -1031,16 +1041,25 @@ if __name__ == "__main__":
     parser.add_argument("--render-every", type=int, default=5, help="Visible mode only: draw every N logic frames.")
     parser.add_argument("--log-every", type=int, default=1000, help="Print training status every N logic frames.")
     parser.add_argument("--log-file", default="training_log.jsonl", help="Append JSONL training metrics here. Empty disables file logging.")
-    parser.add_argument("--batch-size", type=int, default=64, help="Replay batch size for each gradient update.")
-    parser.add_argument("--train-every", type=int, default=4, help="Run gradient updates every N agent steps.")
-    parser.add_argument("--gradient-steps", type=int, default=1, help="Gradient updates to run at each training point.")
+    parser.add_argument("--batch-size", type=int, default=None, help="Replay batch size for each gradient update.")
+    parser.add_argument("--train-every", type=int, default=None, help="Run gradient updates every N agent steps.")
+    parser.add_argument("--gradient-steps", type=int, default=None, help="Gradient updates to run at each training point.")
+    parser.add_argument("--torch-threads", type=int, default=None, help="Torch CPU threads. Default: balanced in headless, 1 in display mode.")
     args = parser.parse_args()
+
+    batch_size = args.batch_size if args.batch_size is not None else (128 if args.headless else 64)
+    train_every = args.train_every if args.train_every is not None else 4
+    gradient_steps = args.gradient_steps if args.gradient_steps is not None else 1
+    torch_threads = args.torch_threads
+    if torch_threads is None:
+        torch_threads = max(1, min((os.cpu_count() or 2) - 1, 8)) if args.headless else 1
+    torch.set_num_threads(torch_threads)
 
     agent = STGAgent(
         device=args.device,
-        batch_size=args.batch_size,
-        train_every=args.train_every,
-        gradient_steps=args.gradient_steps,
+        batch_size=batch_size,
+        train_every=train_every,
+        gradient_steps=gradient_steps,
     )
 
     model_loaded = False
@@ -1056,12 +1075,23 @@ if __name__ == "__main__":
     else:
         print(f"Starting fresh on {agent.device}.", flush=True)
 
+    if not args.headless:
+        agent.epsilon = 0.0
+        print("Display mode: training disabled, greedy inference only. Press M to toggle audio.", flush=True)
+    else:
+        print(
+            f"Training mode: batch={batch_size}, train_every={train_every}, "
+            f"gradient_steps={gradient_steps}, torch_threads={torch_threads}.",
+            flush=True,
+        )
+
     game = Train(
         headless=args.headless,
         render_every=args.render_every,
         log_every=args.log_every,
         checkpoint=args.checkpoint,
         log_file=args.log_file or None,
-        load_training_state=model_loaded,
+        load_training_state=not args.no_load,
+        training_enabled=args.headless,
     )
     game.run()

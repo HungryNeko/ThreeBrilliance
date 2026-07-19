@@ -125,9 +125,6 @@ class DRLAgent:
         self.attack_prior_scale = 300.0
         self.boss_attack_prior_scale = 700.0
         self.attack_vertical_min = 40.0
-        self.attack_under_distance = 340.0
-        self.attack_under_band = 220.0
-        self.boss_position_reward_scale = 15.0
         self.hit_reward_scale = 20.0
         self.hurt_penalty_scale = 650.0
 
@@ -256,7 +253,6 @@ class DRLAgent:
         scale = self.boss_attack_prior_scale if getattr(target, "boss", False) else self.attack_prior_scale
         cone_width = max(12.0, max(self.attack_vertical_min, dy_up) * math.tan(math.radians(self.shot_cone_angle_degrees)))
         current_error = abs(float(target.position_x) - x)
-        current_under_error = abs(dy_up - self.attack_under_distance)
         action_delta = (
             (-1, -1), (0, -1), (1, -1),
             (1, 0), (1, 1), (0, 1),
@@ -274,14 +270,9 @@ class DRLAgent:
             next_cone_width = max(12.0, max(self.attack_vertical_min, next_dy_up) * math.tan(math.radians(self.shot_cone_angle_degrees)))
             alignment = max(0.0, 1.0 - next_error / next_cone_width)
             improvement = max(-1.0, min(1.0, (current_error - next_error) / max(1.0, cone_width)))
-            next_under_error = abs(next_dy_up - self.attack_under_distance)
-            under_score = max(0.0, 1.0 - next_under_error / self.attack_under_band)
-            under_improvement = max(-1.0, min(1.0, (current_under_error - next_under_error) / self.attack_under_band))
             priors[action] += scale * (
-                0.45 * alignment
-                + 0.20 * improvement
-                + 0.25 * under_score
-                + 0.10 * under_improvement
+                0.70 * alignment
+                + 0.30 * improvement
             )
             if next_error > current_error + 1e-6:
                 priors[action] -= scale * 0.2
@@ -447,14 +438,12 @@ class DRLAgent:
         hurt_reward = hurt * -self.hurt_penalty_scale
         base_reward = hit_reward + hurt_reward
         aim_reward = (aim_center * 2.0 + (aim_left + aim_right) * 0.3 + aim_alignment * 1.0) * 0.4
-        boss_position_reward = self._get_boss_position_reward(x, y, enemy_list)
         wall_reward = -wall_penalty * (1.0 if enemies_alive else 3.0)
-        reward = (base_reward + aim_reward + boss_position_reward + wall_reward) * wall_reward_coef
+        reward = (base_reward + aim_reward + wall_reward) * wall_reward_coef
         self.last_reward_components = {
             "hit": hit_reward,
             "hurt": hurt_reward,
             "aim": aim_reward,
-            "boss_position": boss_position_reward,
             "wall": wall_reward,
             "wall_coef": wall_reward_coef,
             "total": reward,
@@ -709,49 +698,6 @@ class DRLAgent:
             best_alignment = max(best_alignment, alignment)
             nearest_dist_norm = min(nearest_dist_norm, min(1.0, dist / self.shot_range))
         return left_count, center_count, right_count, best_alignment, nearest_dist_norm
-
-    def _get_boss_position_reward(self, x, y, enemy_list):
-        bosses = [
-            enemy
-            for enemy in enemy_list
-            if getattr(enemy, "boss", False) and getattr(enemy, "show", True)
-        ]
-        if not bosses:
-            return 0.0
-
-        boss = min(bosses, key=lambda enemy: abs(enemy.position_x - x) + abs(enemy.position_y - y))
-        dx = float(boss.position_x) - x
-        dy_up = y - float(boss.position_y)
-        if dy_up <= 0.0:
-            return -self.boss_position_reward_scale
-        if dy_up > self.shot_range:
-            return 0.0
-
-        boss_size = float(getattr(boss, "size", 0.0))
-        cone_width = max(
-            16.0,
-            dy_up * math.tan(math.radians(self.shot_cone_angle_degrees)) + boss_size,
-        )
-        center_width = max(
-            10.0,
-            dy_up * math.tan(math.radians(self.shot_center_angle_degrees)) + boss_size,
-        )
-        abs_dx = abs(dx)
-        cone_score = max(0.0, 1.0 - abs_dx / cone_width)
-        center_score = max(0.0, 1.0 - abs_dx / center_width)
-        under_error = abs(dy_up - self.attack_under_distance)
-        under_score = max(0.0, 1.0 - under_error / self.attack_under_band)
-
-        reward = self.boss_position_reward_scale * (
-            1.20 * center_score
-            + 0.65 * cone_score
-            + 0.45 * under_score
-        )
-        if abs_dx > cone_width:
-            reward -= self.boss_position_reward_scale * min(1.0, (abs_dx - cone_width) / 160.0)
-        if dy_up < self.attack_vertical_min:
-            reward -= self.boss_position_reward_scale * 0.8
-        return reward
 
     def _get_direction_threat(self, x, y, wall_x, wall_y, enemy_list):
         action_delta = [
