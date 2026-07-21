@@ -1,1 +1,1 @@
-{"total_reward":18498541.374747545,"reward_steps":101999,"best_stage":4,"best_stage_kill":0,"best_stage_kill_boss":0,"win_count":0,"best_avg_reward":181.3600268115133,"episode":189,"death_resets":189,"boss_stall_resets":0}
+{"total_reward":23501471.41837181,"reward_steps":132998,"log_step":133000,"best_stage":4,"best_stage_kill":0,"best_stage_kill_boss":0,"win_count":2,"best_avg_reward":202.29004753652396,"episode":163,"death_resets":163,"boss_stall_resets":0}

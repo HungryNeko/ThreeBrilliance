@@ -1,5 +1,6 @@
 import math
 import argparse
+import csv
 import json
 import os
 import random
@@ -19,6 +20,9 @@ import img
 from drl_agent import DRLAgent as STGAgent
 
 
+REWARD_SCHEMA_VERSION = 4
+
+
 class Train:
     def __init__(
             self,
@@ -26,7 +30,7 @@ class Train:
             render_every=5,
             log_every=1000,
             checkpoint="current_best_dqn.pth",
-            log_file="training_log.jsonl",
+            log_file="training_log.csv",
             load_training_state=True,
             training_enabled=None):
         self.boss_exist = False
@@ -39,6 +43,7 @@ class Train:
         self.action=8
         self.headless = headless
         self.checkpoint = checkpoint
+        self.best_checkpoint = self._best_checkpoint_path(checkpoint)
         if self.headless:
             os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
             os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -87,16 +92,35 @@ class Train:
         self.best_stage_kill_boss = 0
         self.win_count = 0
         self.best_avg_reward = float("-inf")
+        self.best_model_avg_reward = float("-inf")
+        self.best_model_score = None
+        self.best_rollback_bad_logs = 0
+        self.best_rollback_count = 0
+        self.best_rollback_cooldown_until = 0
+        self.best_rollback_margin = 60.0
+        self.best_rollback_patience = 3
+        self.best_rollback_min_steps = 30000
         self.episode = 0
         self.death_resets = 0
         self.boss_stall_resets = 0
         self.last_terminal_reason = ""
         self.last_time_boss_damage = 0
+        self.last_time_boss_reward_damage = 0
+        self.window_boss_damage = 0.0
+        self.window_boss_reward_damage = 0.0
+        self.window_min_boss_hp_pct = None
+        self.last_seen_boss_hp_pct = 0.0
+        self.boss_no_damage_frames = 0
         self.boss_no_hit_frames = 0
         self.boss_low_hp_no_hit_frames = 0
         self.boss_stall_hp_pct = 0.35
         self.boss_stall_no_hit_limit = 2400
         self.boss_stall_low_hp_no_hit_limit = 1200
+        self.hit_death_extra_penalty = -5000.0
+        self.low_boss_survival_hp_pct = 0.60
+        self.low_boss_survival_reward_scale = 18.0
+        self.final_boss_survival_hp_pct = 0.30
+        self.final_boss_survival_reward_scale = 25.0
         self.start_time = time.time()
         self.total_reward = 0.0
         self.reward_steps = 0
@@ -116,18 +140,21 @@ class Train:
         self.last_boss_time_penalty = 0.0
         self.total_boss_time_penalty = 0.0
         self.log_file_path = log_file
-        self.log_file = open(log_file, "a", buffering=1) if log_file else None
+        self.log_header_written = bool(log_file and os.path.exists(log_file) and os.path.getsize(log_file) > 0)
+        self.log_file = open(log_file, "a", buffering=1, encoding="utf-8", newline="") if log_file else None
+        self.log_writer = None
+        self.log_fieldnames = None
         self.training_state_path = f"{checkpoint}.train_state.json" if checkpoint else None
         if load_training_state:
             self._load_training_state()
 
-        # 资源加载
+        # 璧勬簮鍔犺浇
         self.spritesheet = img.load_character_spritesheet("src/img_1.png", 4, 3, 50, 50) if self.visual else []
         self.volume = .5 if self.audio_enabled else 0.0
         if self.audio_enabled:
-            self.close_sound = character.safe_sound("src/东方原作音效/绀长擦弹.wav", self.volume)
-            self.hit_sound = character.safe_sound("src/东方原作音效/莎莎火箭弹命中.wav", self.volume)
-            self.crash_sound = character.safe_sound("src/东方原作音效/击破boss.wav", self.volume)
+            self.close_sound = character.safe_sound("src/涓滄柟鍘熶綔闊虫晥/缁€闀挎摝寮?wav", self.volume)
+            self.hit_sound = character.safe_sound("src/涓滄柟鍘熶綔闊虫晥/鑾庤帋鐏寮瑰懡涓?wav", self.volume)
+            self.crash_sound = character.safe_sound("src/涓滄柟鍘熶綔闊虫晥/鍑荤牬boss.wav", self.volume)
             self.sound = character.safe_sound("src/th15_13.mp3", self.volume)
             self.channel_sound = character.safe_channel(0)
             self.channel_hit = character.safe_channel(1)
@@ -150,15 +177,24 @@ class Train:
         self.lastbosstime=0
         self.player1.level=4
 
-        # 可调参数 for enemytype4
+        # 鍙皟鍙傛暟 for enemytype4
         self.enemytype4_cfg = {
             "enemy0_num": 2,
             "enemy1_num": 2,
             "boss0_num": 1,
             "enemy0_freq": 200,
             "enemy1_freq": 300,
-            "boss0_unique": True, # 只允许同时存在一个boss
+            "boss0_unique": True, # 鍙厑璁稿悓鏃跺瓨鍦ㄤ竴涓猙oss
         }
+
+    @staticmethod
+    def _best_checkpoint_path(checkpoint):
+        if not checkpoint:
+            return None
+        root, ext = os.path.splitext(checkpoint)
+        if not ext:
+            ext = ".pth"
+        return f"{root}.best{ext}"
 
     def new_enemy(self, i=0):
 
@@ -179,7 +215,7 @@ class Train:
                                                        60, True,
                                                        [0, 0, self.WINDOW_WIDTH, self.WINDOW_HEIGHT], 10000, (255, 0, 0), 1, volume=self.volume))
         if i == 4:
-            # 4类型为 0/1/3 的结合，不新建类，而是调用各自生成
+            # 4绫诲瀷涓?0/1/3 鐨勭粨鍚堬紝涓嶆柊寤虹被锛岃€屾槸璋冪敤鍚勮嚜鐢熸垚
             # enemy0
             if self.enemytype4_cfg["enemy0_num"] > 0:
                 if self.count % self.enemytype4_cfg["enemy0_freq"] == 0:
@@ -335,13 +371,16 @@ class Train:
         now = time.time()
         elapsed = max(1e-6, now - self.start_time)
         window_elapsed = max(1e-6, now - self.last_log_time)
-        sps = (self.count - self.last_log_count) / window_elapsed
+        window_steps = max(1, self.count - self.last_log_count)
+        sps = window_steps / window_elapsed
         accuracy = self.total_hit_power / max(1.0, self.total_shot_power)
         window_accuracy = self.window_hit_power / max(1.0, self.window_shot_power)
-        boss_pct = self._boss_hp_pct()
+        boss_pct = self.window_min_boss_hp_pct
+        if boss_pct is None:
+            boss_pct = self._boss_hp_pct()
         decision = getattr(agent, "last_decision", {})
         loss = decision.get("loss")
-        avg_reward = self.total_reward / max(1, self.reward_steps)
+        avg_reward = self.window_reward / window_steps
         if (self.stage, self.stage_kill, self.stage_kill_boss) > (
             self.best_stage,
             self.best_stage_kill,
@@ -356,22 +395,32 @@ class Train:
         return {
             "step": self.log_step_offset + self.count,
             "session_step": self.count,
-            "elapsed_sec": elapsed,
-            "sps": sps,
-            "device": str(decision.get("device", getattr(agent, "device", "unknown"))),
-            "progress": progress,
-            "best_progress": best_progress,
+            "wins": self.win_count,
             "stage": self.stage,
             "stage_kill": self.stage_kill,
             "stage_boss_kill": self.stage_kill_boss,
-            "wins": self.win_count,
-            "episode": self.episode,
+            "boss_damage": self.window_boss_reward_damage,
+            "boss_real_damage": self.window_boss_damage,
+            "avg_reward": avg_reward,
+            "best_avg_reward": self.best_avg_reward,
+            "reward": self.last_reward,
+            "window_reward": self.window_reward,
             "death_resets": self.death_resets,
             "boss_stall_resets": self.boss_stall_resets,
             "last_terminal_reason": self.last_terminal_reason,
+            "progress": progress,
+            "best_progress": best_progress,
+            "boss_hp_pct": boss_pct,
+            "sps": sps,
+            "epsilon": getattr(agent, "epsilon", 0.0),
+            "loss": loss,
+            "replay_size": decision.get("replay_size", 0),
+            "updates": decision.get("updates", 0),
+            "episode": self.episode,
+            "elapsed_sec": elapsed,
+            "device": str(decision.get("device", getattr(agent, "device", "unknown"))),
             "player_hp": self.player1.health,
             "player_full_hp": self.player1.full_health,
-            "boss_hp_pct": boss_pct,
             "accuracy": accuracy,
             "window_accuracy": window_accuracy,
             "hit_power": self.total_hit_power,
@@ -380,18 +429,9 @@ class Train:
             "window_hit_power": self.window_hit_power,
             "window_hurt_power": self.window_hurt_power,
             "window_shot_power": self.window_shot_power,
-            "reward": self.last_reward,
-            "avg_reward": avg_reward,
-            "best_avg_reward": self.best_avg_reward,
-            "window_reward": self.window_reward,
-            "epsilon": getattr(agent, "epsilon", 0.0),
-            "loss": loss,
-            "replay_size": decision.get("replay_size", 0),
-            "updates": decision.get("updates", 0),
             "action": decision.get("action", self.action),
             "action_label": decision.get("action_label", ""),
             "boss_alive_frames": self.boss_alive_frames,
-            "boss_damage": self.last_time_boss_damage,
             "boss_no_hit_frames": self.boss_no_hit_frames,
             "boss_low_hp_no_hit_frames": self.boss_low_hp_no_hit_frames,
             "boss_time_penalty": self.last_boss_time_penalty,
@@ -401,20 +441,42 @@ class Train:
     def _write_log_record(self, metrics):
         if self.log_file is None:
             return
-        self.log_file.write(json.dumps(metrics, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if self.log_writer is None:
+            self.log_fieldnames = list(metrics.keys())
+            self.log_writer = csv.DictWriter(
+                self.log_file,
+                fieldnames=self.log_fieldnames,
+                extrasaction="ignore",
+                lineterminator="\n",
+            )
+            if not self.log_header_written:
+                self.log_writer.writeheader()
+                self.log_header_written = True
+        self.log_writer.writerow(metrics)
+        self.log_file.flush()
 
     def _save_training_state(self):
         if not self.training_state_path:
             return
         state = {
+            "reward_schema_version": REWARD_SCHEMA_VERSION,
             "total_reward": self.total_reward,
             "reward_steps": self.reward_steps,
             "log_step": self.log_step_offset + self.count,
             "best_stage": self.best_stage,
             "best_stage_kill": self.best_stage_kill,
             "best_stage_kill_boss": self.best_stage_kill_boss,
+            "stage": self.stage,
+            "stage_kill": self.stage_kill,
+            "stage_kill_boss": self.stage_kill_boss,
+            "enemy_type": self.enemy_type,
             "win_count": self.win_count,
             "best_avg_reward": self.best_avg_reward,
+            "best_model_avg_reward": self.best_model_avg_reward,
+            "best_model_score": self.best_model_score,
+            "best_rollback_bad_logs": self.best_rollback_bad_logs,
+            "best_rollback_count": self.best_rollback_count,
+            "best_rollback_cooldown_until": self.best_rollback_cooldown_until,
             "episode": self.episode,
             "death_resets": self.death_resets,
             "boss_stall_resets": self.boss_stall_resets,
@@ -436,8 +498,20 @@ class Train:
         self.best_stage = int(state.get("best_stage", self.best_stage))
         self.best_stage_kill = int(state.get("best_stage_kill", self.best_stage_kill))
         self.best_stage_kill_boss = int(state.get("best_stage_kill_boss", self.best_stage_kill_boss))
+        self.stage = int(state.get("stage", state.get("best_stage", self.stage)))
+        self.stage_kill = int(state.get("stage_kill", self.stage_kill))
+        self.stage_kill_boss = int(state.get("stage_kill_boss", self.stage_kill_boss))
+        self.enemy_type = int(state.get("enemy_type", self._enemy_type_for_stage(self.stage)))
         self.win_count = int(state.get("win_count", self.win_count))
-        self.best_avg_reward = float(state.get("best_avg_reward", self.best_avg_reward))
+        if int(state.get("reward_schema_version", -1)) == REWARD_SCHEMA_VERSION:
+            self.best_avg_reward = float(state.get("best_avg_reward", self.best_avg_reward))
+            self.best_model_avg_reward = float(state.get("best_model_avg_reward", self.best_model_avg_reward))
+            saved_score = state.get("best_model_score")
+            if isinstance(saved_score, list):
+                self.best_model_score = tuple(saved_score)
+            self.best_rollback_bad_logs = int(state.get("best_rollback_bad_logs", self.best_rollback_bad_logs))
+            self.best_rollback_count = int(state.get("best_rollback_count", self.best_rollback_count))
+            self.best_rollback_cooldown_until = int(state.get("best_rollback_cooldown_until", self.best_rollback_cooldown_until))
         self.episode = int(state.get("episode", self.episode))
         self.death_resets = int(state.get("death_resets", self.death_resets))
         self.boss_stall_resets = int(state.get("boss_stall_resets", self.boss_stall_resets))
@@ -447,6 +521,9 @@ class Train:
         self.window_hit_power = 0.0
         self.window_hurt_power = 0.0
         self.window_shot_power = 0.0
+        self.window_boss_damage = 0.0
+        self.window_boss_reward_damage = 0.0
+        self.window_min_boss_hp_pct = None
 
     def _update_boss_time_penalty(self):
         boss_alive = any(
@@ -455,26 +532,102 @@ class Train:
         )
         if not boss_alive:
             self.boss_alive_frames = 0
+            self.boss_no_damage_frames = 0
             self.last_boss_time_penalty = 0.0
             return 0.0
 
         self.boss_alive_frames += 1
-        penalty = -min(50.0, 0.002 * self.boss_alive_frames)
+        if self.last_time_boss_reward_damage > 0:
+            self.boss_no_damage_frames = 0
+            self.last_boss_time_penalty = 0.0
+            return 0.0
+        self.boss_no_damage_frames += 1
+        penalty = -min(6.0, 0.01 * self.boss_no_damage_frames)
         self.last_boss_time_penalty = penalty
         self.total_boss_time_penalty += penalty
         return penalty
 
-    def _boss_hp_pct(self):
+    def _boss_hp_sample(self):
         boss_hp = 0.0
         boss_max_hp = 0.0
         for enemy in self.enemy_list:
             if getattr(enemy, "boss", False) and getattr(enemy, "show", True):
                 boss_hp += max(0.0, getattr(enemy, "health", 0.0))
                 boss_max_hp += max(1.0, getattr(enemy, "full_health", 1.0))
-        return boss_hp / boss_max_hp if boss_max_hp else 0.0
+        if not boss_max_hp:
+            return None
+        return boss_hp / boss_max_hp
+
+    def _boss_hp_pct(self):
+        sample = self._boss_hp_sample()
+        return sample if sample is not None else 0.0
+
+    def _observe_boss_hp_window(self):
+        sample = self._boss_hp_sample()
+        if sample is None:
+            return
+        self.last_seen_boss_hp_pct = sample
+        if self.window_min_boss_hp_pct is None:
+            self.window_min_boss_hp_pct = sample
+        else:
+            self.window_min_boss_hp_pct = min(self.window_min_boss_hp_pct, sample)
+
+    def _non_boss_hit_reward(self):
+        return max(0.0, self.last_time_hit - self.last_time_boss_reward_damage)
+
 
     def _death_penalty(self):
-        return -35000.0 - 25000.0 * self._boss_hp_pct()
+        boss_pct = self._boss_hp_pct()
+        return -9000.0 - 7000.0 * boss_pct
+
+    def _boss_attack_reward(self):
+        if self.last_time_boss_reward_damage <= 0:
+            return 0.0
+        boss_pct = self._boss_hp_pct()
+        progress_multiplier = 0.25 + 1.75 * (1.0 - boss_pct)
+        scale = 35.0 if self.stage == 4 else 20.0
+        return self.last_time_boss_reward_damage * scale * progress_multiplier
+
+    def _low_boss_survival_reward(self):
+        if self.stage != 4:
+            return 0.0
+        if self.last_time_hurt > 0 or self.last_time_boss_reward_damage <= 0:
+            return 0.0
+        boss_pct = self._boss_hp_pct()
+        if boss_pct <= 0.0 or boss_pct >= self.low_boss_survival_hp_pct:
+            return 0.0
+        low_hp_factor = (self.low_boss_survival_hp_pct - boss_pct) / self.low_boss_survival_hp_pct
+        reward = self.last_time_boss_reward_damage * self.low_boss_survival_reward_scale * low_hp_factor
+        if boss_pct < self.final_boss_survival_hp_pct:
+            final_factor = (self.final_boss_survival_hp_pct - boss_pct) / self.final_boss_survival_hp_pct
+            reward += self.last_time_boss_reward_damage * self.final_boss_survival_reward_scale * final_factor
+        return reward
+
+    def _update_best_checkpoint_guard(self, agent, metrics):
+        if not self.training_enabled or not self.best_checkpoint:
+            return
+        score = self._checkpoint_score(metrics)
+        avg_reward = float(metrics["avg_reward"])
+        if self.best_model_score is None or score > self.best_model_score:
+            self.best_model_score = score
+            self.best_model_avg_reward = avg_reward
+            self.best_rollback_bad_logs = 0
+            agent.save(self.best_checkpoint)
+
+    @staticmethod
+    def _checkpoint_score(metrics):
+        stage = int(metrics.get("stage", 0) or 0)
+        boss_pct = float(metrics.get("boss_hp_pct", 0.0) or 0.0)
+        boss_progress = max(0.0, 1.0 - boss_pct) if stage == 4 and boss_pct > 0.0 else 0.0
+        return (
+            int(metrics.get("wins", 0) or 0),
+            stage,
+            int(metrics.get("stage_boss_kill", 0) or 0),
+            boss_progress,
+            float(metrics.get("boss_damage", 0.0) or 0.0),
+            float(metrics.get("boss_real_damage", 0.0) or 0.0),
+            float(metrics.get("avg_reward", 0.0) or 0.0),
+        )
 
     def _update_player_homing_targets(self):
         targets = [enemy for enemy in self.enemy_list if getattr(enemy, "show", True)]
@@ -530,6 +683,8 @@ class Train:
         self.episode += 1
         if reason == "death":
             self.death_resets += 1
+        elif reason == "hit_death":
+            self.death_resets += 1
         elif reason == "boss_stall":
             self.boss_stall_resets += 1
         self.last_terminal_reason = reason
@@ -552,6 +707,7 @@ class Train:
         self.boss_exist = False
         self.lastbosstime = 0
         self.boss_alive_frames = 0
+        self.boss_no_damage_frames = 0
         self.last_boss_time_penalty = 0.0
         self.boss_no_hit_frames = 0
         self.boss_low_hp_no_hit_frames = 0
@@ -562,6 +718,7 @@ class Train:
         self.last_time_hit = 0
         self.last_time_hurt = 0
         self.last_time_boss_damage = 0
+        self.last_time_boss_reward_damage = 0
 
     def _learn_terminal_transition(self, agent, reason, penalty):
         if not self.training_enabled:
@@ -571,14 +728,20 @@ class Train:
         terminal_state, reward = agent._process_game_state(
             self.enemy_list,
             [self.player1.position_x, self.player1.position_y],
-            self.last_time_hit,
+            self._non_boss_hit_reward(),
             self.last_time_hurt,
             self.WINDOW_WIDTH,
             self.WINDOW_HEIGHT,
         )
+        boss_attack_reward = self._boss_attack_reward()
+        low_boss_survival_reward = self._low_boss_survival_reward()
+        reward += boss_attack_reward
+        reward += low_boss_survival_reward
         reward += penalty
         components = getattr(agent, "last_reward_components", None)
         if isinstance(components, dict):
+            components["boss_attack"] = boss_attack_reward
+            components["low_boss_survival"] = low_boss_survival_reward
             components["terminal"] = penalty
             components["total"] = reward
         self.last_reward = reward
@@ -590,6 +753,10 @@ class Train:
         agent.last_action = None
 
     def _handle_terminal_state(self, agent):
+        if self.last_time_hurt > 0:
+            self._learn_terminal_transition(agent, "hit_death", self._death_penalty() + self.hit_death_extra_penalty)
+            self._reset_episode("hit_death")
+            return True
         if self.player1.health <= 0:
             self._learn_terminal_transition(agent, "death", self._death_penalty())
             self._reset_episode("death")
@@ -617,6 +784,7 @@ class Train:
         print("\r" + status + (" " * padding), end="", flush=True)
         self._last_status_width = len(status)
         self._write_log_record(metrics)
+        self._update_best_checkpoint_guard(agent, metrics)
         if self.training_enabled:
             self._save_training_state()
         self._reset_log_window()
@@ -629,27 +797,32 @@ class Train:
         if self.learntimes%1==0:
             if self.training_enabled and self.learncount==1:
                 #self.learntimes+=1
-                agent.save(self.checkpoint)  # 保存模型状态
-                self._save_training_state()
-            # 1. 如果存在上一次的状态和动作，先进行学习
+                agent.save(self.checkpoint)  # 淇濆瓨妯″瀷鐘舵€?                self._save_training_state()
+            # 1. 濡傛灉瀛樺湪涓婁竴娆＄殑鐘舵€佸拰鍔ㄤ綔锛屽厛杩涜瀛︿範
             current_state = None
             if self.training_enabled and self._last_processed_state is not None and self._last_action is not None:
-                # 获取当前状态
+                # 鑾峰彇褰撳墠鐘舵€?
                 current_state, reward = agent._process_game_state(
                     self.enemy_list,
                     [self.player1.position_x, self.player1.position_y],
-                    self.last_time_hit,
+                    self._non_boss_hit_reward(),
                     self.last_time_hurt,
                     self.WINDOW_WIDTH,
                     self.WINDOW_HEIGHT
                 )
                 enemies_alive_for_reward = len(self.enemy_list) > 0
                 if self._had_enemies_for_reward and not enemies_alive_for_reward:
-                    reward += 100  # 消灭所有敌人奖励
+                    reward += 100  # 娑堢伃鎵€鏈夋晫浜哄鍔?
                 self._had_enemies_for_reward = enemies_alive_for_reward
+                boss_attack_reward = self._boss_attack_reward()
+                low_boss_survival_reward = self._low_boss_survival_reward()
+                reward += boss_attack_reward
+                reward += low_boss_survival_reward
                 reward += self._update_boss_time_penalty()
                 components = getattr(agent, "last_reward_components", None)
                 if isinstance(components, dict):
+                    components["boss_attack"] = boss_attack_reward
+                    components["low_boss_survival"] = low_boss_survival_reward
                     components["boss_time"] = self.last_boss_time_penalty
                     components["total"] = reward
                 self.last_reward = reward
@@ -657,15 +830,15 @@ class Train:
                 self.reward_steps += 1
                 self.window_reward += reward
 
-                # 进行Q-learning更新
+                # 杩涜Q-learning鏇存柊
                 agent.learn(reward, current_state, self._last_action)
 
-            # 2. 处理当前状态并获取新动作
+            # 2. 澶勭悊褰撳墠鐘舵€佸苟鑾峰彇鏂板姩浣?
             if current_state is None:
                 processed_state, current_reward = agent._process_game_state(
                     self.enemy_list,
                     [self.player1.position_x, self.player1.position_y],
-                    self.last_time_hit,
+                    self._non_boss_hit_reward(),
                     self.last_time_hurt,
                     self.WINDOW_WIDTH,
                     self.WINDOW_HEIGHT
@@ -674,10 +847,10 @@ class Train:
                 processed_state = current_state
             #print(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
 
-            # 3. 获取动作
+            # 3. 鑾峰彇鍔ㄤ綔
             action = agent.get_action(processed_state,self.enemy_list)
 
-            # 4. 存储当前状态和动作
+            # 4. 瀛樺偍褰撳墠鐘舵€佸拰鍔ㄤ綔
             self._last_processed_state = processed_state
             self._last_action = action
             self.action = action
@@ -685,10 +858,11 @@ class Train:
             #     self.player1.level+=(self.last_time_hit*0.001)*(4-self.player1.level)
             # if self.player1.level>0:
             #     self.player1.level-= self.last_time_hurt*(4-self.player1.level)*0.5
-            # 5. 重置命中/受伤计数器
+            # 5. 閲嶇疆鍛戒腑/鍙椾激璁℃暟鍣?
             self.last_time_hit = 0
             self.last_time_hurt = 0
             self.last_time_boss_damage = 0
+            self.last_time_boss_reward_damage = 0
             #print(action)
 
     def run(self):
@@ -712,35 +886,36 @@ class Train:
             shot_power = sum(getattr(bullet, "reward_power", getattr(bullet, "power", 0.0)) for bullet in new_player_bullets)
             self.total_shot_power += shot_power
             self.window_shot_power += shot_power
-            if self.action == 0:  # 左上
+            if self.action == 0:  # 宸︿笂
                 self.player1.move_x(-shift)
                 self.player1.move_y(-shift)
-            elif self.action == 1:  # 上
+            elif self.action == 1:  # 涓?
                 self.player1.move_y(-shift)
-            elif self.action == 2:  # 右上
+            elif self.action == 2:  # 鍙充笂
                 self.player1.move_x(shift)
                 self.player1.move_y(-shift)
-            elif self.action == 3:  # 右
+            elif self.action == 3:  # 鍙?
                 self.player1.move_x(shift)
-            elif self.action == 4:  # 右下
+            elif self.action == 4:  # 鍙充笅
                 self.player1.move_x(shift)
                 self.player1.move_y(shift)
-            elif self.action == 5:  # 下
+            elif self.action == 5:  # 涓?
                 self.player1.move_y(shift)
-            elif self.action == 6:  # 左下
+            elif self.action == 6:  # 宸︿笅
                 self.player1.move_x(-shift)
                 self.player1.move_y(shift)
-            elif self.action == 7:  # 左
+            elif self.action == 7:  # 宸?
                 self.player1.move_x(-shift)
-            elif self.action == 8:  # 不动
+            elif self.action == 8:  # 涓嶅姩
                 pass
 
 
-            # AI/训练接口
+            # AI/璁粌鎺ュ彛
 
             self.last_time_hit = 0
             self.last_time_hurt = 0
             self.last_time_boss_damage = 0
+            self.last_time_boss_reward_damage = 0
 
             should_render = self._should_render_frame()
             if should_render:
@@ -798,7 +973,7 @@ class Train:
                     x, y = i.before(0, 0.5)
                     color_2 = tuple(max(0, value - 50) for value in i.color)
                     pygame.draw.circle(self.window, color_2, (x, y), i.size)
-            #hit检测
+            #hit妫€娴?
             for i1, i in enumerate(self.player1.bullets):
                 if should_render:
                     pygame.draw.circle(self.window, i.color, (i.position_x, i.position_y), i.size)
@@ -812,6 +987,9 @@ class Train:
                         reward_power = getattr(i, "reward_power", i.power)
                         if e.boss:
                             self.last_time_boss_damage += i.power
+                            self.window_boss_damage += i.power
+                            self.last_time_boss_reward_damage += reward_power
+                            self.window_boss_reward_damage += reward_power
                         if was_alive and e.health <= 0:
                             self.stage_kill += 1
                             if e.boss:
@@ -828,6 +1006,7 @@ class Train:
                                 self.channel_crash.play(self.crash_sound)
                     if self.visual and self.audio_enabled and not self.channel_hit.get_busy():
                         self.channel_hit.play(self.hit_sound)
+            self._observe_boss_hp_window()
             if should_render:
                 pl = self.count // 10
                 if direction == 0:
@@ -851,6 +1030,7 @@ class Train:
                         if dist_sq < hit_radius * hit_radius and self.player1.show:
 
                             self.player1.change_health(-b.power)
+                            self.player1.health = 0
                             self.last_time_hurt += b.power
                             self.total_hurt_power += b.power
                             self.window_hurt_power += b.power
@@ -888,38 +1068,38 @@ class Train:
     def move_randomly(self, x, y, speed):
         limitx = 590
         limity = 290
-        min_boundary = 10  # 最小边界
+        min_boundary = 10  # 鏈€灏忚竟鐣?
 
-        # 使用 self.rand 计算随机角度 θ ∈ [0, 2π)
+        # 浣跨敤 self.rand 璁＄畻闅忔満瑙掑害 胃 鈭?[0, 2蟺)
         random.seed(self.rand)
-        theta = random.uniform(0, 2 * math.pi)  # 随机角度
-        dx = speed * math.cos(theta)  # x方向变化
-        dy = speed * math.sin(theta)  # y方向变化
+        theta = random.uniform(0, 2 * math.pi)  # 闅忔満瑙掑害
+        dx = speed * math.cos(theta)  # x鏂瑰悜鍙樺寲
+        dy = speed * math.sin(theta)  # y鏂瑰悜鍙樺寲
 
-        # 计算新位置
+        # 璁＄畻鏂颁綅缃?
         new_x = x + dx
         new_y = y + dy
 
-        # 检查是否撞墙
+        # 妫€鏌ユ槸鍚︽挒澧?
         hit_wall = False
         if new_x < min_boundary or new_x > limitx:
-            dx = -dx  # 水平反弹
+            dx = -dx  # 姘村钩鍙嶅脊
             new_x = x + dx
             hit_wall = True
         if new_y < min_boundary or new_y > limity:
-            dy = -dy  # 垂直反弹
+            dy = -dy  # 鍨傜洿鍙嶅脊
             new_y = y + dy
             hit_wall = True
 
-        # 如果撞墙，更新 self.rand
+        # 濡傛灉鎾炲锛屾洿鏂?self.rand
         if hit_wall:
-            self.rand = random.randint(0, 2 ** 32 - 1)  # 生成新的随机种子
+            self.rand = random.randint(0, 2 ** 32 - 1)  # 鐢熸垚鏂扮殑闅忔満绉嶅瓙
 
         return new_x, new_y
 
     def draw_agent_zones(self, surface, agent, player_pos, color_direction=(0, 255, 0), color_box=(255, 0, 0), width=1):
         """
-        所有九宫格中心点距离为d，均为边长2*d正方形，中心点用圆点标记。
+        鎵€鏈変節瀹牸涓績鐐硅窛绂讳负d锛屽潎涓鸿竟闀?*d姝ｆ柟褰紝涓績鐐圭敤鍦嗙偣鏍囪銆?
         """
         import pygame
         import math
@@ -1031,7 +1211,7 @@ class Train:
             text = self.debug_font.render(line, True, (230, 235, 240))
             panel.blit(text, (padding, padding + i * line_height))
         self.window.blit(panel, (8, 8))
-# 用于直接运行
+# 鐢ㄤ簬鐩存帴杩愯
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--headless", action="store_true", help="Run without a visible pygame window.")
@@ -1040,7 +1220,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-load", action="store_true", help="Start a new model instead of loading checkpoint.")
     parser.add_argument("--render-every", type=int, default=5, help="Visible mode only: draw every N logic frames.")
     parser.add_argument("--log-every", type=int, default=1000, help="Print training status every N logic frames.")
-    parser.add_argument("--log-file", default="training_log.jsonl", help="Append JSONL training metrics here. Empty disables file logging.")
+    parser.add_argument("--log-file", default="training_log.csv", help="Append CSV training metrics here. Empty disables file logging.")
     parser.add_argument("--batch-size", type=int, default=None, help="Replay batch size for each gradient update.")
     parser.add_argument("--train-every", type=int, default=None, help="Run gradient updates every N agent steps.")
     parser.add_argument("--gradient-steps", type=int, default=None, help="Gradient updates to run at each training point.")

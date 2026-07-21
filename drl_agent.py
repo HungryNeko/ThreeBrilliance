@@ -31,18 +31,32 @@ class GridState:
 
 
 class ReplayBuffer:
+    """Stores each state once: next_state of item i is state of item i+1."""
+
     def __init__(self, capacity):
         self.items = deque(maxlen=capacity)
 
     def __len__(self):
         return len(self.items)
 
-    def push(self, state, action, reward, next_state, done=False):
-        self.items.append((state, action, reward, next_state, done))
+    def clear(self):
+        self.items.clear()
+
+    def push(self, state, action, reward, done=False):
+        self.items.append((state, action, reward, done))
 
     def sample(self, batch_size):
-        batch = random.sample(self.items, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        max_index = len(self.items) - 1
+        idxs = random.sample(range(max_index), min(batch_size, max_index))
+        states, actions, rewards, next_states, dones = [], [], [], [], []
+        for i in idxs:
+            state, action, reward, done = self.items[i]
+            states.append(state)
+            # done 时 next_state 不参与 target 计算，复用自身即可
+            next_states.append(self.items[i + 1][0] if not done else state)
+            actions.append(action)
+            rewards.append(reward)
+            dones.append(done)
         return states, actions, rewards, next_states, dones
 
 
@@ -101,7 +115,7 @@ class ConvDQN(nn.Module):
 class DRLAgent:
     _stamp_offset_cache = {}
 
-    def __init__(self, device="auto", batch_size=64, train_every=4, gradient_steps=1):
+    def __init__(self, device="auto", batch_size=64, train_every=4, gradient_steps=1, replay_capacity=50_000):
         self.action_size = 9
         self.wall_x = 600
         self.wall_y = 900
@@ -126,11 +140,12 @@ class DRLAgent:
         self.boss_attack_prior_scale = 700.0
         self.attack_vertical_min = 40.0
         self.hit_reward_scale = 20.0
-        self.hurt_penalty_scale = 650.0
+        self.hurt_penalty_scale = 900.0
 
         self.grid_width = 60
         self.grid_height = 90
         self.grid_channels = 8
+        self.flow_lookahead = 6  # 光流外推帧数
         self.local_grid_size = 64
         self.local_grid_channels = 8
         self.local_world_radius = 260
@@ -148,11 +163,11 @@ class DRLAgent:
         self.epsilon_min = 0.03
         self.epsilon_decay = 0.9995
         self.batch_size = batch_size
-        self.learning_rate = 1e-4
+        self.learning_rate = 3e-5
         self.train_every = train_every
         self.gradient_steps = gradient_steps
-        self.target_update_every = 1000
-        self.replay = ReplayBuffer(100_000)
+        self.target_update_every = 3000
+        self.replay = ReplayBuffer(replay_capacity)
         self.steps = 0
         self.updates = 0
         self.loss_ema = None
@@ -347,9 +362,15 @@ class DRLAgent:
 
     def learn(self, reward, next_full_state, action, done=False):
         if self.last_state is not None and self.last_action is not None:
-            self.replay.push(self.last_state, self.last_action, reward, next_full_state, done)
-        self.last_state = next_full_state
-        self.last_action = action
+            self.replay.push(self.last_state, self.last_action, reward, done)
+        if done:
+            # 终止帧也入池，使 (state, action, reward, done=True) 可学习
+            self.replay.push(next_full_state, action, 0.0, True)
+            self.last_state = None
+            self.last_action = None
+        else:
+            self.last_state = next_full_state
+            self.last_action = action
 
         if len(self.replay) < self.batch_size or self.steps % self.train_every != 0:
             return
@@ -394,12 +415,12 @@ class DRLAgent:
             return self.policy_net(grid, local_grid, vector).squeeze(0).cpu().numpy()
 
     def _batch_grids(self, states):
-        arr = np.stack([s.grid for s in states]).astype(np.float32)
-        return torch.from_numpy(arr).to(self.device)
+        arr = np.stack([s.grid for s in states])
+        return torch.from_numpy(arr).to(self.device, non_blocking=True).float()
 
     def _batch_local_grids(self, states):
-        arr = np.stack([s.local_grid for s in states]).astype(np.float32)
-        return torch.from_numpy(arr).to(self.device)
+        arr = np.stack([s.local_grid for s in states])
+        return torch.from_numpy(arr).to(self.device, non_blocking=True).float()
 
     def _batch_vectors(self, states):
         arr = np.stack([s.vector for s in states]).astype(np.float32)
@@ -416,22 +437,26 @@ class DRLAgent:
         local_grid = self._encode_local_grid(enemy_list, x, y, wall_x, wall_y)
 
         enemies_alive = any(getattr(e, "show", True) for e in enemy_list)
-        wall_penalty_dist = 100
-        wall_punish_base = 1.0
-        k = 15.0
-        min_dist_to_wall = min(x, wall_x - x, y, wall_y - y)
-        if min_dist_to_wall < wall_penalty_dist:
-            wall_penalty = wall_punish_base * math.exp((wall_penalty_dist - min_dist_to_wall) / k)
+        edge_x = max(1.0, wall_x * 0.05)
+        edge_y = max(1.0, wall_y * 0.05)
+        dist_x = min(x, wall_x - x)
+        dist_y = min(y, wall_y - y)
+        min_dist_to_wall = min(dist_x, dist_y)
+        edge_pressure_x = max(0.0, (edge_x - dist_x) / edge_x)
+        edge_pressure_y = max(0.0, (edge_y - dist_y) / edge_y)
+        edge_pressure = max(edge_pressure_x, edge_pressure_y)
+        wall_penalty = edge_pressure * edge_pressure * 2.0
+        if edge_pressure <= 0.0:
+            wall_reward_coef = 1.0
+        elif edge_pressure < 0.35:
+            wall_reward_coef = 0.8
+        elif edge_pressure < 0.7:
+            wall_reward_coef = 0.6
         else:
-            wall_penalty = 0.0
+            wall_reward_coef = 0.4
+
         if min_dist_to_wall > 200:
             wall_reward_coef = 1.0
-        elif min_dist_to_wall > 100:
-            wall_reward_coef = 0.6
-        elif min_dist_to_wall > 50:
-            wall_reward_coef = 0.4
-        else:
-            wall_reward_coef = 0.2
 
         aim_left, aim_center, aim_right, aim_alignment, aim_dist = aim_features
         hit_reward = hit * self.hit_reward_scale
@@ -483,7 +508,7 @@ class DRLAgent:
         return GridState(grid=grid, local_grid=local_grid, vector=vector, features=features), reward
 
     def _encode_grid(self, enemy_list, x, y, wall_x, wall_y):
-        grid = np.zeros((self.grid_channels, self.grid_height, self.grid_width), dtype=np.float32)
+        grid = np.zeros((self.grid_channels, self.grid_height, self.grid_width), dtype=np.float16)
         sx = self.grid_width / wall_x
         sy = self.grid_height / wall_y
 
@@ -499,8 +524,22 @@ class DRLAgent:
                 self._stamp(grid[0], gx, gy, radius, 1.0)
                 vx = getattr(bullet, "vx", bullet.position_x - getattr(bullet, "last_x", bullet.position_x))
                 vy = getattr(bullet, "vy", bullet.position_y - getattr(bullet, "last_y", bullet.position_y))
-                self._stamp(grid[1], gx, gy, radius, max(-1.0, min(1.0, vx / 20.0)))
-                self._stamp(grid[2], gx, gy, radius, max(-1.0, min(1.0, vy / 20.0)))
+                # 光流式运动趋势场:沿 (vx,vy) 外推未来 1..flow_lookahead 帧
+                # 近处权重 1.0,远处衰减到 1/flow_lookahead
+                cvx = max(-1.0, min(1.0, vx / 20.0))
+                cvy = max(-1.0, min(1.0, vy / 20.0))
+                self._stamp(grid[1], gx, gy, radius, cvx)
+                self._stamp(grid[2], gx, gy, radius, cvy)
+                step_x = vx * sx
+                step_y = vy * sy
+                for k in range(1, self.flow_lookahead + 1):
+                    px = int(bx * sx + step_x * k)
+                    py = int(by * sy + step_y * k)
+                    if not (0 <= px < self.grid_width and 0 <= py < self.grid_height):
+                        break
+                    w = 1.0 / (k + 1)
+                    self._stamp(grid[1], px, py, radius, cvx * w)
+                    self._stamp(grid[2], px, py, radius, cvy * w)
 
         for enemy in enemy_list:
             if not getattr(enemy, "show", True):
@@ -522,7 +561,7 @@ class DRLAgent:
     def _encode_local_grid(self, enemy_list, x, y, wall_x, wall_y):
         grid = np.zeros(
             (self.local_grid_channels, self.local_grid_size, self.local_grid_size),
-            dtype=np.float32,
+            dtype=np.float16,
         )
 
         for enemy in enemy_list:
@@ -539,9 +578,24 @@ class DRLAgent:
                 toward = max(0.0, -((bx - x) * vx + (by - y) * vy) / (max(1.0, math.hypot(bx - x, by - y)) * speed))
                 bullet_radius = max(1, radius + int(getattr(bullet, "size", 0) / 4))
                 self._stamp(grid[0], gx, gy, bullet_radius, 1.0)
-                self._stamp(grid[1], gx, gy, bullet_radius, max(-1.0, min(1.0, vx / 12.0)))
-                self._stamp(grid[2], gx, gy, bullet_radius, max(-1.0, min(1.0, vy / 12.0)))
+                cvx = max(-1.0, min(1.0, vx / 12.0))
+                cvy = max(-1.0, min(1.0, vy / 12.0))
+                self._stamp(grid[1], gx, gy, bullet_radius, cvx)
+                self._stamp(grid[2], gx, gy, bullet_radius, cvy)
                 self._stamp(grid[3], gx, gy, bullet_radius, toward)
+                # 局部视野内沿运动方向外推趋势(local grid 中 1 格 ≈ local_world_radius/32 px)
+                local_step = self.local_world_radius / (self.local_grid_size / 2)
+                step_gx = vx / local_step
+                step_gy = vy / local_step
+                for k in range(1, self.flow_lookahead + 1):
+                    px = int(gx + step_gx * k)
+                    py = int(gy + step_gy * k)
+                    if not (0 <= px < self.local_grid_size and 0 <= py < self.local_grid_size):
+                        break
+                    w = 1.0 / (k + 1)
+                    self._stamp(grid[1], px, py, bullet_radius, cvx * w)
+                    self._stamp(grid[2], px, py, bullet_radius, cvy * w)
+                    self._stamp(grid[3], px, py, bullet_radius, toward * w)
 
         for enemy in enemy_list:
             if not getattr(enemy, "show", True):
@@ -604,22 +658,25 @@ class DRLAgent:
         height, width = channel.shape
         offsets = DRLAgent._stamp_offset_cache.get(radius)
         if offsets is None:
+            if len(DRLAgent._stamp_offset_cache) > 64:
+                DRLAgent._stamp_offset_cache.clear()
             radius_sq = radius * radius
-            offsets = [
-                (dy, dx)
-                for dy in range(-radius, radius + 1)
-                for dx in range(-radius, radius + 1)
-                if dx * dx + dy * dy <= radius_sq
-            ]
+            dy, dx = np.mgrid[-radius:radius + 1, -radius:radius + 1]
+            mask = dx * dx + dy * dy <= radius_sq
+            offsets = (dy[mask], dx[mask])
             DRLAgent._stamp_offset_cache[radius] = offsets
-        for dy, dx in offsets:
-            yy = gy + dy
-            xx = gx + dx
-            if 0 <= yy < height and 0 <= xx < width:
-                if value >= 0:
-                    channel[yy, xx] = max(channel[yy, xx], value)
-                else:
-                    channel[yy, xx] = min(channel[yy, xx], value)
+        oy, ox = offsets
+        yy = gy + oy
+        xx = gx + ox
+        valid = (0 <= yy) & (yy < height) & (0 <= xx) & (xx < width)
+        if not np.any(valid):
+            return
+        yy = yy[valid]
+        xx = xx[valid]
+        if value >= 0:
+            np.maximum.at(channel, (yy, xx), value)
+        else:
+            np.minimum.at(channel, (yy, xx), value)
 
     def _encode_shot_cone_channel(self, channel, x, y, wall_x, wall_y):
         cone = math.radians(self.shot_cone_angle_degrees)
@@ -771,3 +828,8 @@ class DRLAgent:
         self.steps = checkpoint.get("steps", self.steps)
         self.updates = checkpoint.get("updates", self.updates)
         self.loss_ema = checkpoint.get("loss_ema", self.loss_ema)
+
+    def clear_replay(self):
+        self.replay.clear()
+        self.last_state = None
+        self.last_action = None
