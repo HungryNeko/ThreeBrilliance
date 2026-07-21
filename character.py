@@ -1,4 +1,5 @@
 import math
+import random
 import sys
 
 import pygame
@@ -102,8 +103,8 @@ class enemy0(objects.character):
     def __init__(self, position_x, position_y, speed, size, check_in, range, health,color,fire_rate=60):
         super().__init__(position_x, position_y, speed, size, check_in, range, health,color)
         self.show=True
-        self.count=0
         self.fire_rate=fire_rate
+        self.count=random.randint(0, max(0, min(5, self.fire_rate - 1)))
         self.boss=False
     def shoot(self,x,y):
         if self.show==True:

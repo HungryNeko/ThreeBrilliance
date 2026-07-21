@@ -17,6 +17,7 @@ from sympy.physics.units import action
 
 import character
 import img
+from drl_agent import ACTION_LABELS
 from drl_agent import DRLAgent as STGAgent
 
 
@@ -106,6 +107,7 @@ class Train:
         self.last_terminal_reason = ""
         self.last_time_boss_damage = 0
         self.last_time_boss_reward_damage = 0
+        self.random_first_action_pending = self.training_enabled
         self.window_boss_damage = 0.0
         self.window_boss_reward_damage = 0.0
         self.window_min_boss_hp_pct = None
@@ -715,6 +717,7 @@ class Train:
         self._last_processed_state = None
         self._last_action = None
         self.action = 8
+        self.random_first_action_pending = self.training_enabled
         self.last_time_hit = 0
         self.last_time_hurt = 0
         self.last_time_boss_damage = 0
@@ -849,6 +852,13 @@ class Train:
 
             # 3. 鑾峰彇鍔ㄤ綔
             action = agent.get_action(processed_state,self.enemy_list)
+            if self.random_first_action_pending:
+                action = random.randrange(agent.action_size)
+                if isinstance(getattr(agent, "last_decision", None), dict):
+                    agent.last_decision["action"] = action
+                    agent.last_decision["action_label"] = ACTION_LABELS[action]
+                    agent.last_decision["explored"] = True
+                self.random_first_action_pending = False
 
             # 4. 瀛樺偍褰撳墠鐘舵€佸拰鍔ㄤ綔
             self._last_processed_state = processed_state
