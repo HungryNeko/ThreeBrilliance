@@ -169,11 +169,12 @@ class boss1(enemy0):
         self.boss_card_sound = safe_sound("src/东方原作音效/弹幕展开tan.wav", volume)
         self.channel_card=safe_channel(4)
         self.boss=True
+        self.attack_angle_offset = random.uniform(0.0, 2 * math.pi)
 
     def shoot(self,x,y):
         if self.show==True:
             if self.count % 30<=15 :
-                base_angle = self.count / 90.0
+                base_angle = self.attack_angle_offset + self.count / 90.0
                 group_count = 6
                 bullets_per_group = 5
                 tight_step = math.radians(3.0)
@@ -190,20 +191,20 @@ class boss1(enemy0):
                     self.channel_card.play(self.boss_card_sound)
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 25, 5, False, self.range, 10, "angle_en",
-                                    self.position_x + math.sin(i * 7.2 + self.count / self.fire_rate / 5),
-                                    self.position_y + math.cos(i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
+                                    self.position_x + math.sin(self.attack_angle_offset + i * 7.2 + self.count / self.fire_rate / 5),
+                                    self.position_y + math.cos(self.attack_angle_offset + i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
             
             if self.count%1==0 and self.count%50<=25:#反向旋转
                 for i in range(-2, 1):
                     # self.bullets.append(shoot.bullets(self.position_x, self.position_y, 5, 5, False, self.range, 10,"angle_en",x+i*100,y,5))
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 15, 5, False, self.range, 10, "angle_en",
-                                      self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300),
-                                      self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300), 5,color=(255,165,0)))
+                                      self.position_x - math.sin(self.attack_angle_offset + i * 90 - self.count / self.fire_rate / 300),
+                                      self.position_y - math.cos(self.attack_angle_offset + i * 90 - self.count / self.fire_rate / 300), 5,color=(255,165,0)))
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 15, 5, False, self.range, 10, "angle_en",
-                                      self.position_x - math.sin(i * 90 - self.count / self.fire_rate / 300+30),
-                                      self.position_y - math.cos(i * 90 - self.count / self.fire_rate / 300+30), 5,
+                                      self.position_x - math.sin(self.attack_angle_offset + i * 90 - self.count / self.fire_rate / 300+30),
+                                      self.position_y - math.cos(self.attack_angle_offset + i * 90 - self.count / self.fire_rate / 300+30), 5,
                                       color=(255, 165, 0)))
         else:
             return False
@@ -224,6 +225,7 @@ class boss0(enemy0):
         self.boss_card_sound = safe_sound("src/东方原作音效/弹幕展开tan.wav", volume)
         self.channel_card=safe_channel(4)
         self.boss=True
+        self.attack_angle_offset = random.uniform(0.0, 2 * math.pi)
 
     def shoot(self,x,y):
         if self.show==True:
@@ -232,8 +234,8 @@ class boss0(enemy0):
                     self.channel_card.play(self.boss_card_sound)
                     self.bullets.append(
                         shoot.bullets(self.position_x, self.position_y, 10, 5, False, self.range, 10, "angle_en",
-                                      self.position_x + math.sin(i * 7.2 + self.count / self.fire_rate / 5),
-                                      self.position_y + math.cos(i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
+                                      self.position_x + math.sin(self.attack_angle_offset + i * 7.2 + self.count / self.fire_rate / 5),
+                                      self.position_y + math.cos(self.attack_angle_offset + i * 7.2 + self.count / self.fire_rate / 5), 5,color=(255,165,0)))
 
         else:
             return False

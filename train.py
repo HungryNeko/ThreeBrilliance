@@ -33,7 +33,8 @@ class Train:
             checkpoint="current_best_dqn.pth",
             log_file="training_log.csv",
             load_training_state=True,
-            training_enabled=None):
+            training_enabled=None,
+            random_first_action=None):
         self.boss_exist = False
         self.last_time_hit=0
         self.rand=0
@@ -54,6 +55,7 @@ class Train:
         self.WINDOW_HEIGHT = 900
         self.visual = not self.headless
         self.training_enabled = self.headless if training_enabled is None else training_enabled
+        self.randomize_first_action = self.training_enabled if random_first_action is None else random_first_action
         if self.visual:
             self.ui_scale = self._initial_ui_scale()
             self.display_size = self._scaled_size(self.ui_scale)
@@ -107,7 +109,7 @@ class Train:
         self.last_terminal_reason = ""
         self.last_time_boss_damage = 0
         self.last_time_boss_reward_damage = 0
-        self.random_first_action_pending = self.training_enabled
+        self.random_first_action_pending = self.randomize_first_action
         self.window_boss_damage = 0.0
         self.window_boss_reward_damage = 0.0
         self.window_min_boss_hp_pct = None
@@ -717,7 +719,7 @@ class Train:
         self._last_processed_state = None
         self._last_action = None
         self.action = 8
-        self.random_first_action_pending = self.training_enabled
+        self.random_first_action_pending = self.randomize_first_action
         self.last_time_hit = 0
         self.last_time_hurt = 0
         self.last_time_boss_damage = 0
@@ -1235,6 +1237,8 @@ if __name__ == "__main__":
     parser.add_argument("--train-every", type=int, default=None, help="Run gradient updates every N agent steps.")
     parser.add_argument("--gradient-steps", type=int, default=None, help="Gradient updates to run at each training point.")
     parser.add_argument("--torch-threads", type=int, default=None, help="Torch CPU threads. Default: balanced in headless, 1 in display mode.")
+    parser.add_argument("--eval-epsilon", type=float, default=None, help="Display mode exploration rate. Default keeps checkpoint epsilon.")
+    parser.add_argument("--greedy", action="store_true", help="Display mode only: force epsilon=0 and disable first-action randomization.")
     args = parser.parse_args()
 
     batch_size = args.batch_size if args.batch_size is not None else (128 if args.headless else 64)
@@ -1266,8 +1270,15 @@ if __name__ == "__main__":
         print(f"Starting fresh on {agent.device}.", flush=True)
 
     if not args.headless:
-        agent.epsilon = 0.0
-        print("Display mode: training disabled, greedy inference only. Press M to toggle audio.", flush=True)
+        if args.greedy:
+            agent.epsilon = 0.0
+        elif args.eval_epsilon is not None:
+            agent.epsilon = max(0.0, min(1.0, args.eval_epsilon))
+        print(
+            f"Display mode: training disabled, epsilon={agent.epsilon:.3f}. "
+            "Use --greedy for deterministic inference. Press M to toggle audio.",
+            flush=True,
+        )
     else:
         print(
             f"Training mode: batch={batch_size}, train_every={train_every}, "
@@ -1283,5 +1294,6 @@ if __name__ == "__main__":
         log_file=args.log_file or None,
         load_training_state=not args.no_load,
         training_enabled=args.headless,
+        random_first_action=args.headless or (not args.greedy and agent.epsilon > 0.0),
     )
     game.run()
