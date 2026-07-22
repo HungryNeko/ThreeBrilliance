@@ -21,7 +21,7 @@ from drl_agent import ACTION_LABELS
 from drl_agent import DRLAgent as STGAgent
 
 
-REWARD_SCHEMA_VERSION = 4
+REWARD_SCHEMA_VERSION = 5
 
 
 class Train:
@@ -122,9 +122,9 @@ class Train:
         self.boss_stall_low_hp_no_hit_limit = 1200
         self.hit_death_extra_penalty = -5000.0
         self.low_boss_survival_hp_pct = 0.60
-        self.low_boss_survival_reward_scale = 18.0
+        self.low_boss_survival_reward_scale = 0.8
         self.final_boss_survival_hp_pct = 0.30
-        self.final_boss_survival_reward_scale = 25.0
+        self.final_boss_survival_reward_scale = 1.2
         self.start_time = time.time()
         self.total_reward = 0.0
         self.reward_steps = 0
@@ -589,7 +589,7 @@ class Train:
             return 0.0
         boss_pct = self._boss_hp_pct()
         progress_multiplier = 0.25 + 1.75 * (1.0 - boss_pct)
-        scale = 35.0 if self.stage == 4 else 20.0
+        scale = 0.8 if self.stage == 4 else 1.0
         return self.last_time_boss_reward_damage * scale * progress_multiplier
 
     def _low_boss_survival_reward(self):

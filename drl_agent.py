@@ -136,8 +136,8 @@ class DRLAgent:
         self.safety_lookahead_frames = (1, 2, 4, 6, 8)
         self.safety_penalty_scale = 6000.0
         self.use_attack_prior = True
-        self.attack_prior_scale = 300.0
-        self.boss_attack_prior_scale = 700.0
+        self.attack_prior_scale = 120.0
+        self.boss_attack_prior_scale = 180.0
         self.attack_vertical_min = 40.0
         self.hit_reward_scale = 20.0
         self.hurt_penalty_scale = 900.0
